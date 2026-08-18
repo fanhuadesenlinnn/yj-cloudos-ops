@@ -461,6 +461,51 @@ func (c *Client) describeDisks(region string, page, size int) (*diskListResp, er
 	return resp, err
 }
 
+// ---------- GetRegion（用户侧云运营 API，V2 签名） ----------
+
+type AZ struct {
+	AzID   string
+	AzName string
+}
+
+type Region struct {
+	RegionID   string
+	RegionName string
+	AzList     []AZ
+}
+
+type regionResp struct {
+	Data []struct {
+		RegionID   string `json:"RegionId"`
+		RegionName string `json:"RegionName"`
+		AzList     []struct {
+			AzID   string `json:"AzId"`
+			AzName string `json:"AzName"`
+		} `json:"AzList"`
+	} `json:"Data"`
+}
+
+// getRegions 查询产品可用地域（ProductCode 如 VM）
+func (c *Client) getRegions(productCode string) ([]*Region, error) {
+	resp := &regionResp{}
+	err := c.doGET("/product", map[string]string{
+		"Action":      "GetRegion",
+		"ProductCode": productCode,
+	}, resp)
+	if err != nil {
+		return nil, err
+	}
+	var regions []*Region
+	for _, r := range resp.Data {
+		rg := &Region{RegionID: r.RegionID, RegionName: r.RegionName}
+		for _, a := range r.AzList {
+			rg.AzList = append(rg.AzList, AZ{AzID: a.AzID, AzName: a.AzName})
+		}
+		regions = append(regions, rg)
+	}
+	return regions, nil
+}
+
 // ---------- 工具 ----------
 
 func itoa(n int) string {

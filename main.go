@@ -8,9 +8,10 @@ import (
 )
 
 var (
-	version    = "dev"
-	configPath = flag.String("c", "config.yaml", "YAML 配置文件路径")
-	showVer    = flag.Bool("v", false, "显示版本号")
+	version     = "dev"
+	configPath  = flag.String("c", "config.yaml", "YAML 配置文件路径")
+	showVer     = flag.Bool("v", false, "显示版本号")
+	listRegions = flag.Bool("list-regions", false, "列出账号可见的区域ID（ProductCode=VM），用于填写 regionId")
 )
 
 func main() {
@@ -27,6 +28,14 @@ func main() {
 		os.Exit(1)
 	}
 	client := newClient(cfg)
+
+	if *listRegions {
+		if err := printRegions(client); err != nil {
+			fmt.Fprintf(os.Stderr, "查询区域失败: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 
 	// 1. 解析项目（同名多项目交互选择）
 	project, err := resolveProject(client, cfg)

@@ -106,6 +106,29 @@ func pwStr(cfg *Config, vm *VM) string {
 	return vm.Password
 }
 
+// ---------- 区域列表输出（-list-regions） ----------
+
+func printRegions(client *Client) error {
+	regions, err := client.getRegions("VM")
+	if err != nil {
+		return err
+	}
+	if len(regions) == 0 {
+		fmt.Println("未查询到可用区域")
+		return nil
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "区域ID\t区域名称\t可用区")
+	for _, r := range regions {
+		var azs []string
+		for _, a := range r.AzList {
+			azs = append(azs, fmt.Sprintf("%s(%s)", orDash(a.AzID), orDash(a.AzName)))
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\n", orDash(r.RegionID), orDash(r.RegionName), strings.Join(azs, ", "))
+	}
+	return w.Flush()
+}
+
 // ---------- 导出 CSV（配置了路径才导出） ----------
 
 func exportCSV(cfg *Config, project *Project, vms []*VM) error {

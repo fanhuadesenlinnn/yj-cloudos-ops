@@ -51,6 +51,10 @@ git push origin v1.0.0
 ## 运行
 
 ```bash
+# 先查看账号可见的区域ID，确认 config.yaml 中的 regionId
+./yj-cloudos-ops-linux-amd64 -c config.yaml -list-regions
+
+# 正式检查项目下所有虚拟机
 ./yj-cloudos-ops-linux-amd64 -c config.yaml
 ```
 
