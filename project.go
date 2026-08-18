@@ -8,32 +8,67 @@ import (
 	"strings"
 )
 
-// resolveProject 通过 GetProjectList 按名称解析项目
-// 0 个匹配 -> 报错；1 个匹配 -> 直接使用；多个同名 -> 交互式让用户选择
+// resolveProject 解析项目：
+// 1. 先全量拉 GetProjectList 做精确名称匹配（同名多项目交互选择）
+// 2. 若 GetProjectList 未返回该项目，兑底从 DescribeDisks 数据中的 projectName 反查
 func resolveProject(c *Client, cfg *Config) (*Project, error) {
-	projects, err := c.getProjectList(cfg.Project.Name)
+	projects, err := c.getProjectList()
 	if err != nil {
 		return nil, err
 	}
+	p, found, err := exactMatchOne(projects, cfg.Project.Name)
+	if err != nil {
+		return nil, err
+	}
+	if found {
+		return p, nil
+	}
 
+	// 兑底：从云硬盘数据反查项目
+	fmt.Fprintf(os.Stderr, "GetProjectList 中未找到项目 %q，尝试从云硬盘数据反查...\n", cfg.Project.Name)
+	diskProjects, err := c.diskProjectCatalog(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("云硬盘数据反查失败: %w", err)
+	}
+	p, found, err = exactMatchOne(diskProjects, cfg.Project.Name)
+	if err != nil {
+		return nil, err
+	}
+	if found {
+		fmt.Fprintf(os.Stderr, "已通过云硬盘数据解析到项目: %s (ID=%s)\n", p.Name, p.ID)
+		return p, nil
+	}
+
+	// 都找不到：报错并列出已知项目帮助用户排查
+	known := make([]string, 0, len(projects))
+	for _, pp := range projects {
+		known = append(known, fmt.Sprintf("%s(%s)", pp.Name, pp.ID))
+	}
+	for _, pp := range diskProjects {
+		known = append(known, fmt.Sprintf("%s(%s)", pp.Name, pp.ID))
+	}
+	return nil, fmt.Errorf("未找到名称为 %q 的项目。当前可识别项目: %v", cfg.Project.Name, known)
+}
+
+// exactMatchOne 精确名称匹配：0 个 -> found=false；1 个直接返回；多个同名交互选择
+func exactMatchOne(projects []*Project, name string) (*Project, bool, error) {
 	var matches []*Project
 	for _, p := range projects {
-		if p.Name == cfg.Project.Name { // 精确匹配
+		if p.Name == name {
 			matches = append(matches, p)
 		}
 	}
-
 	switch len(matches) {
 	case 0:
-		names := make([]string, 0, len(projects))
-		for _, p := range projects {
-			names = append(names, p.Name)
-		}
-		return nil, fmt.Errorf("未找到名称为 %q 的项目（模糊搜索结果: %v）", cfg.Project.Name, names)
+		return nil, false, nil
 	case 1:
-		return matches[0], nil
+		return matches[0], true, nil
 	default:
-		return chooseProject(matches)
+		p, err := chooseProject(matches)
+		if err != nil {
+			return nil, false, err
+		}
+		return p, true, nil
 	}
 }
 

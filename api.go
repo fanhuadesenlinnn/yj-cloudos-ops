@@ -174,6 +174,9 @@ func (c *Client) saveRaw(params map[string]string, body []byte) {
 		action = "unknown"
 	}
 	name := action
+	if inst := params["InstanceId"]; inst != "" {
+		name += "_" + inst // GetEcsPassword 等按实例查询的接口，按实例ID区分文件，避免覆盖
+	}
 	if page := params["Page"]; page != "" {
 		name += "_p" + page
 	}
@@ -269,45 +272,57 @@ type projectListResp struct {
 	Data       []map[string]any `json:"Data"`
 }
 
-func (c *Client) getProjectList(name string) ([]*Project, error) {
-	resp := &projectListResp{}
-	err := c.doGET("/project", map[string]string{
-		"Action":      "GetProjectList",
-		"ProjectName": name, // 文档说明为模糊搜索，客户端再做精确匹配
-		"Page":        "1",
-		"Size":        "100",
-	}, resp)
-	if err != nil {
-		return nil, err
-	}
+func (c *Client) getProjectList() ([]*Project, error) {
 	var projects []*Project
-	for _, m := range resp.Data {
-		p := &Project{}
-		if v, ok := m["Id"].(string); ok {
-			p.ID = v
+	page := 1
+	for {
+		resp := &projectListResp{}
+		err := c.doGET("/project", map[string]string{
+			"Action": "GetProjectList",
+			"Page":   itoa(page),
+			"Size":   "100",
+		}, resp)
+		if err != nil {
+			return nil, err
 		}
-		if v, ok := m["Name"].(string); ok {
-			p.Name = v
+		for _, m := range resp.Data {
+			p := parseProject(m)
+			projects = append(projects, p)
 		}
-		if v, ok := m["ProjectTypeName"].(string); ok {
-			p.TypeName = v
+		// 分页结束：已取满或本次为空
+		if len(resp.Data) == 0 || len(projects) >= resp.TotalCount {
+			break
 		}
-		if v, ok := m["Description"].(string); ok {
-			p.Description = v
-		}
-		if v, ok := m["Enabled"].(float64); ok {
-			p.Enabled = int(v)
-		}
-		// 创建时间：文档未列明字段名，兼容多种命名，尽力展示
-		for _, k := range []string{"createTime", "createdTime", "CreateTime", "gmtCreate", "CreateDate"} {
-			if v, ok := m[k]; ok {
-				p.CreateTime = formatTimeAny(v)
-				break
-			}
-		}
-		projects = append(projects, p)
+		page++
 	}
 	return projects, nil
+}
+
+func parseProject(m map[string]any) *Project {
+	p := &Project{}
+	if v, ok := m["Id"].(string); ok {
+		p.ID = v
+	}
+	if v, ok := m["Name"].(string); ok {
+		p.Name = v
+	}
+	if v, ok := m["ProjectTypeName"].(string); ok {
+		p.TypeName = v
+	}
+	if v, ok := m["Description"].(string); ok {
+		p.Description = v
+	}
+	if v, ok := m["Enabled"].(float64); ok {
+		p.Enabled = int(v)
+	}
+	// 创建时间：文档未列明字段名，兼容多种命名，尽力展示
+	for _, k := range []string{"createTime", "createdTime", "CreateTime", "gmtCreate", "CreateDate"} {
+		if v, ok := m[k]; ok {
+			p.CreateTime = formatTimeAny(v)
+			break
+		}
+	}
+	return p
 }
 
 func formatTimeAny(v any) string {
@@ -428,7 +443,7 @@ func (c *Client) describeEnis(region string, page, size int) (*eniResp, error) {
 type diskListResp struct {
 	Records []diskItem `json:"records"`
 	Pages   int        `json:"pages"`
-	Total   string     `json:"total"`
+	Total   any        `json:"total"` // 文档写 String，实际返回数字，用 any 兼容
 	Current int        `json:"current"`
 	Size    int        `json:"size"`
 }
@@ -504,6 +519,36 @@ func (c *Client) getRegions(productCode string) ([]*Region, error) {
 		regions = append(regions, rg)
 	}
 	return regions, nil
+}
+
+// diskProjectCatalog 从 DescribeDisks 返回数据中解析 项目ID->项目名称 映射（去重）
+// 用于 GetProjectList 未返回目标项目时的兑底解析
+func (c *Client) diskProjectCatalog(cfg *Config) ([]*Project, error) {
+	seen := map[string]bool{}
+	var projects []*Project
+	page := 1
+	for {
+		resp, err := c.describeDisks(cfg.RegionID, page, cfg.Pagination.PageSize)
+		if err != nil {
+			return nil, err
+		}
+		for _, r := range resp.Records {
+			if r.ProjectID == "" || r.ProjectName == "" {
+				continue
+			}
+			key := r.ProjectID + "\x00" + r.ProjectName
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			projects = append(projects, &Project{ID: r.ProjectID, Name: r.ProjectName})
+		}
+		if resp.Pages <= 0 || page >= resp.Pages {
+			break
+		}
+		page++
+	}
+	return projects, nil
 }
 
 // ---------- 工具 ----------

@@ -8,10 +8,11 @@ import (
 )
 
 var (
-	version     = "dev"
-	configPath  = flag.String("c", "config.yaml", "YAML 配置文件路径")
-	showVer     = flag.Bool("v", false, "显示版本号")
-	listRegions = flag.Bool("list-regions", false, "列出账号可见的区域ID（ProductCode=VM），用于填写 regionId")
+	version      = "dev"
+	configPath   = flag.String("c", "config.yaml", "YAML 配置文件路径")
+	showVer      = flag.Bool("v", false, "显示版本号")
+	listRegions  = flag.Bool("list-regions", false, "列出账号可见的区域ID（ProductCode=VM），用于填写 regionId")
+	listProjects = flag.Bool("list-projects", false, "列出账号可见的项目，用于填写 project.name")
 )
 
 func main() {
@@ -32,6 +33,14 @@ func main() {
 	if *listRegions {
 		if err := printRegions(client); err != nil {
 			fmt.Fprintf(os.Stderr, "查询区域失败: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
+	if *listProjects {
+		if err := printProjects(client); err != nil {
+			fmt.Fprintf(os.Stderr, "查询项目失败: %v\n", err)
 			os.Exit(1)
 		}
 		os.Exit(0)

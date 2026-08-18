@@ -129,6 +129,26 @@ func printRegions(client *Client) error {
 	return w.Flush()
 }
 
+// ---------- 项目列表输出（-list-projects） ----------
+
+func printProjects(client *Client) error {
+	projects, err := client.getProjectList()
+	if err != nil {
+		return err
+	}
+	if len(projects) == 0 {
+		fmt.Println("未查询到可用项目")
+		return nil
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "项目ID\t项目名称\t类型\t启用\t描述")
+	for _, p := range projects {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+			orDash(p.ID), orDash(p.Name), orDash(p.TypeName), enabledStr(p.Enabled), orDash(p.Description))
+	}
+	return w.Flush()
+}
+
 // ---------- 导出 CSV（配置了路径才导出） ----------
 
 func exportCSV(cfg *Config, project *Project, vms []*VM) error {
