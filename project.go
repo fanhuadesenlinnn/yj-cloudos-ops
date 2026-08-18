@@ -8,15 +8,46 @@ import (
 	"strings"
 )
 
-// resolveProject 解析项目：
+// resolveProjects 解析项目列表（支持多项目与全部项目）
+// 返回 projects（已去重的项目列表）与 allMode（是否检查全部项目）
+func resolveProjects(c *Client, cfg *Config) ([]*Project, bool, error) {
+	names := cfg.Project.Names
+	if len(names) == 0 && cfg.Project.Name != "" {
+		names = []string{cfg.Project.Name}
+	}
+	// 全部项目模式
+	for _, n := range names {
+		if n == "*" || n == "all" || n == "ALL" {
+			return nil, true, nil
+		}
+	}
+
+	seen := map[string]bool{}
+	var projects []*Project
+	for _, name := range names {
+		p, err := resolveProject(c, cfg, name)
+		if err != nil {
+			return nil, false, err
+		}
+		if seen[p.ID] {
+			continue
+		}
+		seen[p.ID] = true
+		projects = append(projects, p)
+		fmt.Fprintf(os.Stderr, "目标项目: %s (ID=%s)\n", p.Name, p.ID)
+	}
+	return projects, false, nil
+}
+
+// resolveProject 解析单个项目：
 // 1. 先全量拉 GetProjectList 做精确名称匹配（同名多项目交互选择）
 // 2. 若 GetProjectList 未返回该项目，兑底从 DescribeDisks 数据中的 projectName 反查
-func resolveProject(c *Client, cfg *Config) (*Project, error) {
+func resolveProject(c *Client, cfg *Config, name string) (*Project, error) {
 	projects, err := c.getProjectList()
 	if err != nil {
 		return nil, err
 	}
-	p, found, err := exactMatchOne(projects, cfg.Project.Name)
+	p, found, err := exactMatchOne(projects, name)
 	if err != nil {
 		return nil, err
 	}
@@ -25,12 +56,12 @@ func resolveProject(c *Client, cfg *Config) (*Project, error) {
 	}
 
 	// 兑底：从云硬盘数据反查项目
-	fmt.Fprintf(os.Stderr, "GetProjectList 中未找到项目 %q，尝试从云硬盘数据反查...\n", cfg.Project.Name)
+	fmt.Fprintf(os.Stderr, "GetProjectList 中未找到项目 %q，尝试从云硬盘数据反查...\n", name)
 	diskProjects, err := c.diskProjectCatalog(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("云硬盘数据反查失败: %w", err)
 	}
-	p, found, err = exactMatchOne(diskProjects, cfg.Project.Name)
+	p, found, err = exactMatchOne(diskProjects, name)
 	if err != nil {
 		return nil, err
 	}
@@ -47,7 +78,7 @@ func resolveProject(c *Client, cfg *Config) (*Project, error) {
 	for _, pp := range diskProjects {
 		known = append(known, fmt.Sprintf("%s(%s)", pp.Name, pp.ID))
 	}
-	return nil, fmt.Errorf("未找到名称为 %q 的项目。当前可识别项目: %v", cfg.Project.Name, known)
+	return nil, fmt.Errorf("未找到名称为 %q 的项目。当前可识别项目: %v", name, known)
 }
 
 // exactMatchOne 精确名称匹配：0 个 -> found=false；1 个直接返回；多个同名交互选择

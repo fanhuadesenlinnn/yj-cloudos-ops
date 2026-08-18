@@ -13,11 +13,11 @@ import (
 
 // ---------- 屏幕输出：一个虚拟机一行 ----------
 
-func outputTable(cfg *Config, project *Project, vms []*VM) error {
+func outputTable(cfg *Config, vms []*VM) error {
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "序号\t名称\t内网IP\tEIP\tMAC\t规格\t系统盘\t数据盘\t项目\t密码\tSSH登录")
+	fmt.Fprintln(w, "序号\t名称\t内网IP\tEIP\tMAC\t规格\t系统盘\t数据盘\t项目\t密码\tSSH登录\t运行状态")
 	for i, vm := range vms {
-		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			i+1,
 			orDash(vm.Name),
 			orDash(vm.IP),
@@ -26,12 +26,38 @@ func outputTable(cfg *Config, project *Project, vms []*VM) error {
 			specStr(vm),
 			sysDiskStr(vm),
 			dataDiskStr(vm),
-			project.Name,
+			orDash(vm.ProjectName),
 			pwStr(cfg, vm),
 			vm.SSHResult,
+			statusStr(vm),
 		)
 	}
 	return w.Flush()
+}
+
+// statusStr 服务器运行状态摘要（一行展示 CPU/内存/磁盘/负载）
+func statusStr(vm *VM) string {
+	s := vm.ServerStatus
+	if s == nil {
+		return "—"
+	}
+	var parts []string
+	if s.CPUUsed != "" {
+		parts = append(parts, "CPU "+s.CPUUsed+"%")
+	}
+	if s.MemUsedPct != "" {
+		parts = append(parts, "内存 "+s.MemUsedPct+"%")
+	}
+	if s.DiskUsePct != "" {
+		parts = append(parts, "磁盘 "+s.DiskUsePct+"%")
+	}
+	if s.LoadAvg != "" {
+		parts = append(parts, "负载 "+s.LoadAvg)
+	}
+	if len(parts) == 0 {
+		return "✓ 已连接"
+	}
+	return strings.Join(parts, " ")
 }
 
 func specStr(vm *VM) string {
@@ -151,7 +177,7 @@ func printProjects(client *Client) error {
 
 // ---------- 导出 CSV（配置了路径才导出） ----------
 
-func exportCSV(cfg *Config, project *Project, vms []*VM) error {
+func exportCSV(cfg *Config, vms []*VM) error {
 	f, err := os.Create(cfg.Output.CSVPath)
 	if err != nil {
 		return err
@@ -167,7 +193,10 @@ func exportCSV(cfg *Config, project *Project, vms []*VM) error {
 
 	header := []string{"序号", "虚拟机名称", "实例ID", "内网IP", "EIP", "MAC", "状态",
 		"规格编码", "规格描述", "CPU核数", "内存G", "系统盘大小G", "系统盘类型",
-		"数据盘", "项目名称", "项目ID", "root密码", "SSH登录结果"}
+		"数据盘", "项目名称", "项目ID", "root密码", "SSH登录结果",
+		"操作系统", "内核版本", "运行时长", "负载(1/5/15)",
+		"CPU使用率%", "内存总量", "内存已用", "内存使用率%",
+		"根分区总量", "根分区已用", "根分区使用率%"}
 	if err := w.Write(header); err != nil {
 		return err
 	}
@@ -187,11 +216,12 @@ func exportCSV(cfg *Config, project *Project, vms []*VM) error {
 			itoa(vm.SysDisk.Size),
 			diskShortType(vm.SysDisk),
 			dataDiskStr(vm),
-			project.Name,
-			project.ID,
+			vm.ProjectName,
+			vm.ProjectID,
 			vm.Password,
 			vm.SSHResult,
 		}
+		row = append(row, statusCSVFields(vm)...)
 		if err := w.Write(row); err != nil {
 			return err
 		}
@@ -199,9 +229,20 @@ func exportCSV(cfg *Config, project *Project, vms []*VM) error {
 	return nil
 }
 
+// statusCSVFields 服务器运行状态明细列
+func statusCSVFields(vm *VM) []string {
+	s := vm.ServerStatus
+	if s == nil {
+		return []string{"", "", "", "", "", "", "", "", "", "", ""}
+	}
+	return []string{s.OS, s.Kernel, s.Uptime, s.LoadAvg,
+		s.CPUUsed, s.MemTotal, s.MemUsed, s.MemUsedPct,
+		s.DiskTotal, s.DiskUsed, s.DiskUsePct}
+}
+
 // ---------- 导出 Excel（配置了路径才导出） ----------
 
-func exportExcel(cfg *Config, project *Project, vms []*VM) error {
+func exportExcel(cfg *Config, vms []*VM) error {
 	if err := os.MkdirAll(filepath.Dir(cfg.Output.ExcelPath), 0o755); err != nil {
 		return err
 	}
@@ -213,13 +254,8 @@ func exportExcel(cfg *Config, project *Project, vms []*VM) error {
 	header := []string{"序号", "虚拟机名称", "实例ID", "内网IP", "EIP", "MAC", "状态",
 		"规格编码", "规格描述", "CPU核数", "内存G", "系统盘大小G", "系统盘类型",
 		"数据盘", "项目名称", "项目ID", "root密码", "SSH登录结果"}
-	for j, h := range header {
-		cell, _ := excelize.CoordinatesToCellName(j+1, 1)
-		f.SetCellValue(sheet, cell, h)
-	}
-	// 表头加粗
 	style, _ := f.NewStyle(&excelize.Style{Font: &excelize.Font{Bold: true}})
-	f.SetCellStyle(sheet, "A1", cellName(len(header), 1), style)
+	writeHeader(f, sheet, header, style)
 
 	for i, vm := range vms {
 		row := []any{
@@ -237,8 +273,8 @@ func exportExcel(cfg *Config, project *Project, vms []*VM) error {
 			vm.SysDisk.Size,
 			diskShortType(vm.SysDisk),
 			dataDiskStr(vm),
-			project.Name,
-			project.ID,
+			vm.ProjectName,
+			vm.ProjectID,
 			vm.Password,
 			vm.SSHResult,
 		}
@@ -250,10 +286,49 @@ func exportExcel(cfg *Config, project *Project, vms []*VM) error {
 	if err := f.AutoFilter(sheet, "A1:"+cellName(len(header), len(vms)+1), nil); err != nil {
 		return err
 	}
+
+	// 服务器运行状态表
+	statusSheet := "服务器运行状态"
+	f.NewSheet(statusSheet)
+	statusHeader := []string{"序号", "虚拟机名称", "内网IP", "项目名称", "SSH登录结果",
+		"操作系统", "内核版本", "运行时长", "负载(1/5/15)",
+		"CPU使用率%", "内存总量", "内存已用", "内存使用率%",
+		"根分区总量", "根分区已用", "根分区使用率%"}
+	writeHeader(f, statusSheet, statusHeader, style)
+	rowIdx := 2
+	for i, vm := range vms {
+		s := vm.ServerStatus
+		row := []any{i + 1, vm.Name, vm.IP, vm.ProjectName, vm.SSHResult}
+		if s == nil {
+			row = append(row, make([]any, 11)...)
+		} else {
+			row = append(row, s.OS, s.Kernel, s.Uptime, s.LoadAvg,
+				s.CPUUsed, s.MemTotal, s.MemUsed, s.MemUsedPct,
+				s.DiskTotal, s.DiskUsed, s.DiskUsePct)
+		}
+		for j, v := range row {
+			cell, _ := excelize.CoordinatesToCellName(j+1, rowIdx)
+			f.SetCellValue(statusSheet, cell, v)
+		}
+		rowIdx++
+	}
+	if err := f.AutoFilter(statusSheet, "A1:"+cellName(len(statusHeader), rowIdx-1), nil); err != nil {
+		return err
+	}
+
 	if err := f.SaveAs(cfg.Output.ExcelPath); err != nil {
 		return err
 	}
 	return nil
+}
+
+// writeHeader 写入表头并加粗
+func writeHeader(f *excelize.File, sheet string, header []string, style int) {
+	for j, h := range header {
+		cell, _ := excelize.CoordinatesToCellName(j+1, 1)
+		f.SetCellValue(sheet, cell, h)
+	}
+	f.SetCellStyle(sheet, "A1", cellName(len(header), 1), style)
 }
 
 func cellName(col, row int) string {

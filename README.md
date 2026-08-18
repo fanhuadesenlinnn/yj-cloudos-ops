@@ -3,11 +3,13 @@
 CloudOS 7.0 虚拟机检查工具（Golang）
 
 按项目检查云平台上所有虚拟机：IP / MAC / 名称 / 所属项目 / root 密码 / 规格 / 磁盘大小（含多块数据盘），
-并用 IP + 密码测试 SSH 是否能正常登录。结果默认显示到屏幕，可配置导出 CSV / Excel。
+并用 IP + 密码测试 SSH 是否能正常登录；登录成功后采集服务器运行状态（OS/负载/CPU/内存/磁盘）。
+结果默认显示到屏幕，可配置导出 CSV / Excel。
 
 - 纯 Go 实现，`CGO_ENABLED=0` 静态编译，**不依赖 glibc**，支持 Windows / Linux
 - 支持跳过证书校验
-- 项目按名称传入，同名多项目时屏幕列出（名称+创建时间）供用户选择
+- 项目按名称传入，支持**多项目**（`project.names`）与**全部项目**（`*` / `all`），同名多项目时屏幕列出供用户选择
+- 服务器运行状态：CPU / 内存 / 磁盘使用率、负载、运行时长、OS、内核，屏幕展示摘要，Excel 单独 Sheet 展示明细
 - 导出文件路径留空则不导出
 
 ## 构建
@@ -43,9 +45,10 @@ git push origin v1.0.0
 | `insecureSkipVerify` | 是否跳过证书校验 |
 | `accessKeyId` / `accessKeySecret` | 平台凭证，控制台 -> 统一身份认证 -> 访问秘钥 |
 | `regionId` | 区域ID，如 cn-beijing |
-| `project.name` | 虚拟机所属项目名称 |
+| `project.name` / `project.names` | 虚拟机所属项目名称（names 支持多个；填 `*` 或 `all` 检查全部项目） |
 | `ssh.useIp` | `internal` / `eip` / `internal-then-eip` |
-| `output.csvPath` / `output.excelPath` | 留空则不导出 |
+| `ssh.checkStatus` | 登录成功后采集服务器运行状态（OS/内核/负载/CPU/内存/磁盘），默认 true |
+| `output.csvPath` / `output.excelPath` | 留空则不导出；Excel 含「虚拟机清单」「服务器运行状态」两个 Sheet |
 | `raw.dir` | 接口原始返回数据保存目录，留空则不保存；保存为 `raw.dir/<运行时间戳>/<Action>[_<实例ID>][_p<页码>].json`，**可能含密码等敏感信息** |
 
 ## 运行
@@ -54,10 +57,10 @@ git push origin v1.0.0
 # 先查看账号可见的区域ID，确认 config.yaml 中的 regionId
 ./yj-cloudos-ops-linux-amd64 -c config.yaml -list-regions
 
-# 查看账号可见的项目，确认 project.name 填哪个
+# 查看账号可见的项目，确认 project.names 填哪些
 ./yj-cloudos-ops-linux-amd64 -c config.yaml -list-projects
 
-# 正式检查项目下所有虚拟机
+# 正式检查项目下所有虚拟机（多项目/全部项目均可）
 ./yj-cloudos-ops-linux-amd64 -c config.yaml
 ```
 
@@ -66,6 +69,10 @@ git push origin v1.0.0
 - 认证：OpenAPI-V2 签名（HMAC-SHA1），公共参数 + 接口参数按字母排序，
   RFC3986 编码（值双重编码，与文档 Java 示例一致），`StringToSign = 方法&%2F&规范化串`，
   HMAC key 为 `Secret+"&"`，Base64 后作为 `Signature`。
+- 项目支持：`project.names` 多项目（可含 `*`/`all` 检查全部）；优先 GetProjectList 全量匹配，
+  未返回时从云硬盘数据 projectName 反查，仍找不到则报错并列出可识别项目。
+- 服务器运行状态：SSH 登录成功后执行 `uname`/`uptime`/`top`/`free`/`df` 采集 OS、内核、运行时长、
+  负载、CPU/内存/磁盘使用率，屏幕展示摘要（CPU 内存 磁盘 负载），Excel「服务器运行状态」Sheet 展示明细。
 - 调用接口：
   - `GetProjectList`（/project）按名称解析项目
   - `DescribeEcs`（/compute/ecs/instances）分页拉全量主机，客户端按 projectId 过滤（该接口无项目筛选参数）

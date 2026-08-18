@@ -28,7 +28,8 @@ type RawCfg struct {
 }
 
 type ProjectCfg struct {
-	Name string `yaml:"name"` // 项目名称（通过 GetProjectList 解析为 projectId）
+	Name  string   `yaml:"name"`  // 兼容单个项目（旧配置）
+	Names []string `yaml:"names"` // 多个项目名称；含 "*" 或 "all" 表示全部项目
 }
 
 type HTTPCfg struct {
@@ -46,6 +47,7 @@ type SSHCfg struct {
 	Workers       int    `yaml:"workers"`       // 并发数，默认 5
 	VerifyCommand string `yaml:"verifyCommand"` // 登录成功后执行的验证命令，默认 "echo ok"
 	UseIP         string `yaml:"useIp"`         // internal / eip / internal-then-eip，默认 internal
+	CheckStatus   *bool  `yaml:"checkStatus"`   // 登录成功后采集服务器运行状态（CPU/内存/磁盘/负载/OS），未配置默认 true
 }
 
 type OutputCfg struct {
@@ -74,8 +76,8 @@ func loadConfig(path string) (*Config, error) {
 	if cfg.RegionID == "" {
 		return nil, fmt.Errorf("缺少配置 regionId")
 	}
-	if cfg.Project.Name == "" {
-		return nil, fmt.Errorf("缺少配置 project.name")
+	if cfg.Project.Name == "" && len(cfg.Project.Names) == 0 {
+		return nil, fmt.Errorf("缺少配置 project.name / project.names")
 	}
 	if cfg.Pagination.PageSize <= 0 {
 		cfg.Pagination.PageSize = 100
@@ -101,6 +103,11 @@ func loadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("ssh.useIp 取值非法: %s（支持 internal / eip / internal-then-eip）", cfg.SSH.UseIP)
 	}
 	return cfg, nil
+}
+
+// CheckStatusEnabled 服务器运行状态采集开关（未配置默认开启）
+func (c *Config) CheckStatusEnabled() bool {
+	return c.SSH.CheckStatus == nil || *c.SSH.CheckStatus
 }
 
 // HTTPTimeout 解析 HTTP 超时

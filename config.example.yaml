@@ -9,8 +9,13 @@ accessKeySecret: "your-access-key-secret"
 regionId: "cn-beijing"
 
 # 虚拟机所属项目（按名称匹配，同名多项目时程序会列出让您选择）
+# names 支持多个项目；填 "*" 或 "all" 表示检查全部项目
+# 兼容旧的单项目配置 project.name
 project:
-  name: "电商项目"
+  names:
+    - "国家药监云一体化管理平台"
+    - "CA-密码"
+    # - "*"    # 检查全部项目
 
 http:
   timeout: 30s
@@ -25,6 +30,7 @@ ssh:
   workers: 5           # 并发测试数量
   verifyCommand: "echo ok"   # 登录成功后执行的验证命令
   useIp: internal      # 用哪个IP测试: internal=内网IP / eip=弹性公网IP / internal-then-eip=先内网后EIP
+  checkStatus: true    # 登录成功后采集服务器运行状态(OS/内核/负载/CPU/内存/磁盘)，true/false，未配置默认true
 
 # 接口原始返回数据保存目录，留空则不保存
 # 目录结构: raw.dir/<运行时间戳>/<Action>[_p<页码>].json

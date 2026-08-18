@@ -247,22 +247,39 @@ type Disk struct {
 	Status   string
 }
 
+type ServerStatus struct {
+	OS         string // 操作系统名称
+	Kernel     string // 内核版本
+	Uptime     string // 运行时长
+	LoadAvg    string // 负载 1/5/15 分钟
+	CPUUsed    string // CPU使用率 %
+	MemTotal   string // 内存总量
+	MemUsed    string // 内存已用
+	MemUsedPct string // 内存使用率 %
+	DiskTotal  string // 根分区总量
+	DiskUsed   string // 根分区已用
+	DiskUsePct string // 根分区使用率 %
+}
+
 type VM struct {
-	ID        string
-	Name      string
-	IP        string
-	EIP       string
-	MAC       string
-	Status    string
-	SpecCode  string
-	SpecName  string
-	CPU       int
-	Memory    int
-	SysDiskID string
-	SysDisk   Disk
-	DataDisks []Disk
-	Password  string
-	SSHResult string
+	ID           string
+	Name         string
+	IP           string
+	EIP          string
+	MAC          string
+	Status       string
+	SpecCode     string
+	SpecName     string
+	CPU          int
+	Memory       int
+	SysDiskID    string
+	SysDisk      Disk
+	DataDisks    []Disk
+	Password     string
+	SSHResult    string
+	ProjectID    string
+	ProjectName  string
+	ServerStatus *ServerStatus // SSH 登录成功后采集的服务器运行状态
 }
 
 // ---------- GetProjectList ----------
