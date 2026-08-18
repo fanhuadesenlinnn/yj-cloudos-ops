@@ -39,7 +39,8 @@ type ResourceCfg struct {
 }
 
 type HTTPCfg struct {
-	Timeout string `yaml:"timeout"` // 如 30s
+	Timeout    string `yaml:"timeout"`    // 如 30s
+	Concurrent int    `yaml:"concurrent"` // API 并发请求数（取密码/详情等），默认 10
 }
 
 type PaginationCfg struct {
@@ -142,6 +143,14 @@ func (c *Config) ServiceNames() []string {
 // HTTPTimeout 解析 HTTP 超时
 func (c *Config) HTTPTimeout() time.Duration {
 	return parseDuration(c.HTTP.Timeout, 30*time.Second)
+}
+
+// HTTPWorkers API 并发请求数（默认 10）
+func (c *Config) HTTPWorkers() int {
+	if c.HTTP.Concurrent <= 0 {
+		return 10
+	}
+	return c.HTTP.Concurrent
 }
 
 // SSHSingleTimeout 单台登录测试超时

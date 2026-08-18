@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 )
 
 var reDiskSize = regexp.MustCompile(`^([0-9.]+)\s*([TtGgMm])?$`)
@@ -220,6 +222,17 @@ func collectVMs(c *Client, cfg *Config, projects []*Project, allMode bool) ([]*V
 		if vm.Type != "裸金属" { // 裸金属的本地盘已在 DetailBms 填充
 			vms[i].DataDisks = diskByVM[vm.ID]
 		}
+	}
+
+	// 2.4 用 GetProjectList 补全项目名（all 模式/无磁盘项目也能显示名称）
+	if pl, err := c.getProjectList(); err == nil {
+		for _, p := range pl {
+			if _, ok := projectNameByID[p.ID]; !ok {
+				projectNameByID[p.ID] = p.Name
+			}
+		}
+	}
+	for i, vm := range vms {
 		vms[i].ProjectName = projectNameByID[vm.ProjectID]
 		if vms[i].ProjectName == "" {
 			vms[i].ProjectName = vm.ProjectID // 未知项目名时显示项目ID
@@ -269,15 +282,95 @@ func collectECS(c *Client, cfg *Config, projectSet map[string]bool, allMode bool
 		}
 		page++
 	}
-	for i, vm := range vms {
-		pw, err := c.getEcsPassword(cfg.RegionID, vm.ID)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "警告: 获取 %s 密码失败: %v\n", vm.Name, err)
-			continue
-		}
-		vms[i].Password = pw
-	}
+	// 并发获取密码（带进度提示）
+	fetchPasswords(c, cfg, vms, "获取虚拟机密码", func(id string) (string, error) {
+		return c.getEcsPassword(cfg.RegionID, id)
+	})
 	return vms, nil
+}
+
+// fetchPasswords 并发获取密码，带进度提示
+func fetchPasswords(c *Client, cfg *Config, vms []*VM, label string, get func(id string) (string, error)) {
+	total := len(vms)
+	if total == 0 {
+		return
+	}
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	var done int64
+	workers := cfg.HTTPWorkers()
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for idx := range jobs {
+				pw, err := get(vms[idx].ID)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "\n警告: 获取 %s 密码失败: %v\n", vms[idx].Name, err)
+				} else {
+					vms[idx].Password = pw
+				}
+				n := atomic.AddInt64(&done, 1)
+				fmt.Fprintf(os.Stderr, "\r%s: %d/%d", label, n, total)
+			}
+		}()
+	}
+	for i := range vms {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+	fmt.Fprintln(os.Stderr)
+}
+
+// fetchBmsDetails 并发获取裸金属详情（系统盘/数据盘）
+func fetchBmsDetails(c *Client, cfg *Config, vms []*VM) {
+	total := len(vms)
+	if total == 0 {
+		return
+	}
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	var done int64
+	workers := cfg.HTTPWorkers()
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for idx := range jobs {
+				vm := vms[idx]
+				detail, err := c.detailBms(cfg.RegionID, vm.ID)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "\n警告: 获取 %s 详情失败: %v\n", vm.Name, err)
+				} else {
+					if detail.SysDisk != "" {
+						vms[idx].SysDiskDesc = detail.SysDisk
+					}
+					if detail.DataDisk != "" {
+						vms[idx].DataDiskDesc = detail.DataDisk
+					}
+					for _, dd := range detail.DataDisks {
+						desc, size := bmsDiskSize(dd.Size)
+						vms[idx].DataDisks = append(vms[idx].DataDisks, Disk{
+							Size:     size,
+							SizeDesc: desc,
+							Type:     dd.Type,
+							SpecCode: dd.SpecificationCode,
+							SpecName: dd.SpecificationName,
+						})
+					}
+				}
+				n := atomic.AddInt64(&done, 1)
+				fmt.Fprintf(os.Stderr, "\r%s: %d/%d", "获取裸金属详情", n, total)
+			}
+		}()
+	}
+	for i := range vms {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+	fmt.Fprintln(os.Stderr)
 }
 
 // collectBMS 拉取裸金属列表并按项目过滤，逐台取密码与详情（结构化数据盘）
@@ -320,36 +413,11 @@ func collectBMS(c *Client, cfg *Config, projectSet map[string]bool, allMode bool
 		}
 		page++
 	}
-	for i, vm := range vms {
-		pw, err := c.getBmsPassword(cfg.RegionID, vm.ID)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "警告: 获取 %s 密码失败: %v\n", vm.Name, err)
-			continue
-		}
-		vms[i].Password = pw
-
-		detail, err := c.detailBms(cfg.RegionID, vm.ID)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "警告: 获取 %s 详情失败: %v\n", vm.Name, err)
-			continue
-		}
-		if detail.SysDisk != "" {
-			vms[i].SysDiskDesc = detail.SysDisk
-		}
-		if detail.DataDisk != "" {
-			vms[i].DataDiskDesc = detail.DataDisk
-		}
-		for _, dd := range detail.DataDisks {
-			desc, size := bmsDiskSize(dd.Size)
-			vms[i].DataDisks = append(vms[i].DataDisks, Disk{
-				Size:     size,
-				SizeDesc: desc,
-				Type:     dd.Type,
-				SpecCode: dd.SpecificationCode,
-				SpecName: dd.SpecificationName,
-			})
-		}
-	}
+	// 并发获取密码与详情（带进度提示）
+	fetchPasswords(c, cfg, vms, "获取裸金属密码", func(id string) (string, error) {
+		return c.getBmsPassword(cfg.RegionID, id)
+	})
+	fetchBmsDetails(c, cfg, vms)
 	return vms, nil
 }
 

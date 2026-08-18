@@ -94,6 +94,8 @@ git push origin v1.0.0
 
 - Windows 老终端（cmd）中文输出请先执行 `chcp 65001`。
 - 分页大小 `pagination.pageSize` 默认 100，部分平台可能有上限，接口报错时调小（如 10）。
+- 取密码/详情等按实例请求已**并发化**（`http.concurrent`，默认 10，可调大提速），并有进度提示，不再长时间无响应。
+- 项目列优先用 GetProjectList（全量拉取）补全项目名，无磁盘的项目也能显示名称而非 ID。
 - MAC 地址：DescribeEnis 返回字段中**未包含 macAddr**（与文档一致），故 MAC 列为空属正常；如确实需要 MAC，需另行确认平台接口。
 - 项目解析：优先用 GetProjectList 全量匹配项目名称；若该接口未返回目标项目（本项目实测只返回 default），会自动从云硬盘数据中的 projectName 反查，仍找不到则报错并列出所有可识别项目。
 - 接口实际返回与文档存在差异（如 DescribeDisks 的 total 文档写 String、实际返回数字），程序已按实际返回兼容，原始数据可通过 `raw.dir` 保存排查。

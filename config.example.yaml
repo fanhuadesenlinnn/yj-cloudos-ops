@@ -23,6 +23,7 @@ project:
 
 http:
   timeout: 30s
+  concurrent: 10      # 取密码/详情等 API 并发请求数，默认 10（调大可加快，注意平台压力）
 
 pagination:
   pageSize: 100        # DescribeEcs/DescribeDisks/DescribeEnis 分页大小，部分平台有上限，报错时可调小
