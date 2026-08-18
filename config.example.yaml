@@ -1,0 +1,32 @@
+# CloudOS 7.0 云主机检查工具配置
+endpoint: "https://127.0.0.1:30990"   # API 服务地址（私有云一般为 https://k8sVIP:30990）
+insecureSkipVerify: true               # 跳过证书校验（自签名证书时设为 true）
+
+# 平台凭证：控制台 -> 统一身份认证 -> 访问秘钥
+accessKeyId: "your-access-key-id"
+accessKeySecret: "your-access-key-secret"
+
+regionId: "cn-beijing"
+
+# 虚拟机所属项目（按名称匹配，同名多项目时程序会列出让您选择）
+project:
+  name: "电商项目"
+
+http:
+  timeout: 30s
+
+pagination:
+  pageSize: 100        # DescribeEcs/DescribeDisks/DescribeEnis 分页大小，部分平台有上限，报错时可调小
+
+ssh:
+  username: root       # 登录用户名
+  port: 22             # SSH 端口
+  timeout: 10s         # 单台登录测试超时
+  workers: 5           # 并发测试数量
+  verifyCommand: "echo ok"   # 登录成功后执行的验证命令
+  useIp: internal      # 用哪个IP测试: internal=内网IP / eip=弹性公网IP / internal-then-eip=先内网后EIP
+
+output:
+  showPassword: true   # 屏幕是否显示密码，false 则显示 ******
+  csvPath: ""          # 留空不导出CSV，如 "result.csv"
+  excelPath: ""        # 留空不导出Excel，如 "result.xlsx"
