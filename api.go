@@ -261,6 +261,12 @@ type ServerStatus struct {
 	DiskUsePct string // 根分区使用率 %
 }
 
+// ServiceStatus 服务运行状态（如 sshd/docker 等）
+type ServiceStatus struct {
+	Name  string // 服务名
+	State string // 原始状态: active/inactive/failed/unknown/not-found
+}
+
 type VM struct {
 	ID           string
 	Name         string
@@ -279,7 +285,8 @@ type VM struct {
 	SSHResult    string
 	ProjectID    string
 	ProjectName  string
-	ServerStatus *ServerStatus // SSH 登录成功后采集的服务器运行状态
+	ServerStatus *ServerStatus   // SSH 登录成功后采集的服务器运行状态
+	Services     []ServiceStatus // SSH 登录成功后检查的服务运行状态
 }
 
 // ---------- GetProjectList ----------

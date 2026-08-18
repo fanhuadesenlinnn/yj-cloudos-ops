@@ -3,13 +3,14 @@
 CloudOS 7.0 虚拟机检查工具（Golang）
 
 按项目检查云平台上所有虚拟机：IP / MAC / 名称 / 所属项目 / root 密码 / 规格 / 磁盘大小（含多块数据盘），
-并用 IP + 密码测试 SSH 是否能正常登录；登录成功后采集服务器运行状态（OS/负载/CPU/内存/磁盘）。
-结果默认显示到屏幕，可配置导出 CSV / Excel。
+并用 IP + 密码测试 SSH 是否能正常登录；登录成功后采集服务器运行状态（OS/负载/CPU/内存/磁盘）
+并检查服务运行状态（如 sshd/docker）。结果默认显示到屏幕，可配置导出 CSV / Excel。
 
 - 纯 Go 实现，`CGO_ENABLED=0` 静态编译，**不依赖 glibc**，支持 Windows / Linux
 - 支持跳过证书校验
 - 项目按名称传入，支持**多项目**（`project.names`）与**全部项目**（`*` / `all`），同名多项目时屏幕列出供用户选择
 - 服务器运行状态：CPU / 内存 / 磁盘使用率、负载、运行时长、OS、内核，屏幕展示摘要，Excel 单独 Sheet 展示明细
+- 服务运行状态：检查 `ssh.services` 配置的服务（如 sshd），屏幕展示 `服务名:运行中/停止/异常`，Excel 单独 Sheet 明细
 - 导出文件路径留空则不导出
 
 ## 构建
@@ -48,6 +49,7 @@ git push origin v1.0.0
 | `project.name` / `project.names` | 虚拟机所属项目名称（names 支持多个；填 `*` 或 `all` 检查全部项目） |
 | `ssh.useIp` | `internal` / `eip` / `internal-then-eip` |
 | `ssh.checkStatus` | 登录成功后采集服务器运行状态（OS/内核/负载/CPU/内存/磁盘），默认 true |
+| `ssh.checkServices` / `ssh.services` | 登录成功后检查服务运行状态（如 sshd/docker），默认 true，services 留空默认查 sshd |
 | `output.csvPath` / `output.excelPath` | 留空则不导出；Excel 含「虚拟机清单」「服务器运行状态」两个 Sheet |
 | `raw.dir` | 接口原始返回数据保存目录，留空则不保存；保存为 `raw.dir/<运行时间戳>/<Action>[_<实例ID>][_p<页码>].json`，**可能含密码等敏感信息** |
 
@@ -73,6 +75,8 @@ git push origin v1.0.0
   未返回时从云硬盘数据 projectName 反查，仍找不到则报错并列出可识别项目。
 - 服务器运行状态：SSH 登录成功后执行 `uname`/`uptime`/`top`/`free`/`df` 采集 OS、内核、运行时长、
   负载、CPU/内存/磁盘使用率，屏幕展示摘要（CPU 内存 磁盘 负载），Excel「服务器运行状态」Sheet 展示明细。
+- 服务运行状态：SSH 登录成功后检查 `ssh.services` 配置的服务（systemctl 优先，兼容 SysV service），
+  屏幕展示 `服务名:运行中/停止/异常/不存在`，Excel「服务运行状态」Sheet 每台虚拟机每个服务一行。
 - 调用接口：
   - `GetProjectList`（/project）按名称解析项目
   - `DescribeEcs`（/compute/ecs/instances）分页拉全量主机，客户端按 projectId 过滤（该接口无项目筛选参数）

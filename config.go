@@ -41,13 +41,15 @@ type PaginationCfg struct {
 }
 
 type SSHCfg struct {
-	Username      string `yaml:"username"`      // 默认 root
-	Port          int    `yaml:"port"`          // 默认 22
-	Timeout       string `yaml:"timeout"`       // 默认 10s
-	Workers       int    `yaml:"workers"`       // 并发数，默认 5
-	VerifyCommand string `yaml:"verifyCommand"` // 登录成功后执行的验证命令，默认 "echo ok"
-	UseIP         string `yaml:"useIp"`         // internal / eip / internal-then-eip，默认 internal
-	CheckStatus   *bool  `yaml:"checkStatus"`   // 登录成功后采集服务器运行状态（CPU/内存/磁盘/负载/OS），未配置默认 true
+	Username      string   `yaml:"username"`      // 默认 root
+	Port          int      `yaml:"port"`          // 默认 22
+	Timeout       string   `yaml:"timeout"`       // 默认 10s
+	Workers       int      `yaml:"workers"`       // 并发数，默认 5
+	VerifyCommand string   `yaml:"verifyCommand"` // 登录成功后执行的验证命令，默认 "echo ok"
+	UseIP         string   `yaml:"useIp"`         // internal / eip / internal-then-eip，默认 internal
+	CheckStatus   *bool    `yaml:"checkStatus"`   // 登录成功后采集服务器运行状态（CPU/内存/磁盘/负载/OS），未配置默认 true
+	CheckServices *bool    `yaml:"checkServices"` // 登录成功后检查服务运行状态，未配置默认 true
+	Services      []string `yaml:"services"`      // 要检查的服务名列表；留空默认检查 sshd
 }
 
 type OutputCfg struct {
@@ -108,6 +110,19 @@ func loadConfig(path string) (*Config, error) {
 // CheckStatusEnabled 服务器运行状态采集开关（未配置默认开启）
 func (c *Config) CheckStatusEnabled() bool {
 	return c.SSH.CheckStatus == nil || *c.SSH.CheckStatus
+}
+
+// CheckServicesEnabled 服务运行状态检查开关（未配置默认开启）
+func (c *Config) CheckServicesEnabled() bool {
+	return c.SSH.CheckServices == nil || *c.SSH.CheckServices
+}
+
+// ServiceNames 需要检查的服务名列表（未配置默认检查 sshd）
+func (c *Config) ServiceNames() []string {
+	if len(c.SSH.Services) == 0 {
+		return []string{"sshd"}
+	}
+	return c.SSH.Services
 }
 
 // HTTPTimeout 解析 HTTP 超时

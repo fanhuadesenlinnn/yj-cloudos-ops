@@ -15,9 +15,9 @@ import (
 
 func outputTable(cfg *Config, vms []*VM) error {
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "序号\t名称\t内网IP\tEIP\tMAC\t规格\t系统盘\t数据盘\t项目\t密码\tSSH登录\t运行状态")
+	fmt.Fprintln(w, "序号\t名称\t内网IP\tEIP\tMAC\t规格\t系统盘\t数据盘\t项目\t密码\tSSH登录\t运行状态\t服务状态")
 	for i, vm := range vms {
-		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			i+1,
 			orDash(vm.Name),
 			orDash(vm.IP),
@@ -30,12 +30,41 @@ func outputTable(cfg *Config, vms []*VM) error {
 			pwStr(cfg, vm),
 			vm.SSHResult,
 			statusStr(vm),
+			servicesStr(vm),
 		)
 	}
 	return w.Flush()
 }
 
-// statusStr 服务器运行状态摘要（一行展示 CPU/内存/磁盘/负载）
+// servicesStr 服务状态摘要（每服务一行内展示: sshd:运行中 crond:停止）
+func servicesStr(vm *VM) string {
+	if len(vm.Services) == 0 {
+		return "—"
+	}
+	parts := make([]string, 0, len(vm.Services))
+	for _, svc := range vm.Services {
+		parts = append(parts, svc.Name+":"+serviceStateLabel(svc.State))
+	}
+	return strings.Join(parts, " ")
+}
+
+// serviceStateLabel 服务状态中文说明
+func serviceStateLabel(state string) string {
+	switch state {
+	case "active", "activating":
+		return "运行中"
+	case "inactive", "deactivating":
+		return "停止"
+	case "failed":
+		return "异常"
+	case "not-found":
+		return "不存在"
+	case "unknown":
+		return "未知"
+	default:
+		return state
+	}
+}
 func statusStr(vm *VM) string {
 	s := vm.ServerStatus
 	if s == nil {
@@ -193,7 +222,7 @@ func exportCSV(cfg *Config, vms []*VM) error {
 
 	header := []string{"序号", "虚拟机名称", "实例ID", "内网IP", "EIP", "MAC", "状态",
 		"规格编码", "规格描述", "CPU核数", "内存G", "系统盘大小G", "系统盘类型",
-		"数据盘", "项目名称", "项目ID", "root密码", "SSH登录结果",
+		"数据盘", "项目名称", "项目ID", "root密码", "SSH登录结果", "服务状态",
 		"操作系统", "内核版本", "运行时长", "负载(1/5/15)",
 		"CPU使用率%", "内存总量", "内存已用", "内存使用率%",
 		"根分区总量", "根分区已用", "根分区使用率%"}
@@ -220,6 +249,7 @@ func exportCSV(cfg *Config, vms []*VM) error {
 			vm.ProjectID,
 			vm.Password,
 			vm.SSHResult,
+			servicesStr(vm),
 		}
 		row = append(row, statusCSVFields(vm)...)
 		if err := w.Write(row); err != nil {
@@ -313,6 +343,36 @@ func exportExcel(cfg *Config, vms []*VM) error {
 		rowIdx++
 	}
 	if err := f.AutoFilter(statusSheet, "A1:"+cellName(len(statusHeader), rowIdx-1), nil); err != nil {
+		return err
+	}
+
+	// 服务运行状态表（每台虚拟机每个服务一行）
+	svcSheet := "服务运行状态"
+	f.NewSheet(svcSheet)
+	svcHeader := []string{"序号", "虚拟机名称", "内网IP", "项目名称", "SSH登录结果", "服务名", "状态", "状态说明"}
+	writeHeader(f, svcSheet, svcHeader, style)
+	svcRow := 2
+	for i, vm := range vms {
+		if len(vm.Services) == 0 {
+			row := []any{i + 1, vm.Name, vm.IP, vm.ProjectName, vm.SSHResult, "", "", ""}
+			for j, v := range row {
+				cell, _ := excelize.CoordinatesToCellName(j+1, svcRow)
+				f.SetCellValue(svcSheet, cell, v)
+			}
+			svcRow++
+			continue
+		}
+		for _, svc := range vm.Services {
+			row := []any{i + 1, vm.Name, vm.IP, vm.ProjectName, vm.SSHResult,
+				svc.Name, svc.State, serviceStateLabel(svc.State)}
+			for j, v := range row {
+				cell, _ := excelize.CoordinatesToCellName(j+1, svcRow)
+				f.SetCellValue(svcSheet, cell, v)
+			}
+			svcRow++
+		}
+	}
+	if err := f.AutoFilter(svcSheet, "A1:"+cellName(len(svcHeader), svcRow-1), nil); err != nil {
 		return err
 	}
 

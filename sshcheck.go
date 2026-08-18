@@ -31,9 +31,10 @@ func runSSHTests(cfg *Config, vms []*VM) {
 		go func() {
 			defer wg.Done()
 			for vm := range jobs {
-				result, status := testOne(cfg, vm)
+				result, status, services := testOne(cfg, vm)
 				vm.SSHResult = result
 				vm.ServerStatus = status
+				vm.Services = services
 				n := atomic.AddInt64(&done, 1)
 				fmt.Fprintf(os.Stderr, "\rSSH登录测试进度: %d/%d", n, total)
 			}
@@ -47,24 +48,24 @@ func runSSHTests(cfg *Config, vms []*VM) {
 	fmt.Fprintln(os.Stderr)
 }
 
-// testOne 对单台虚拟机做登录测试，成功且开启采集时返回服务器运行状态
-func testOne(cfg *Config, vm *VM) (string, *ServerStatus) {
+// testOne 对单台虚拟机做登录测试，成功且开启采集时返回服务器运行状态与服务状态
+func testOne(cfg *Config, vm *VM) (string, *ServerStatus, []ServiceStatus) {
 	if vm.Password == "" {
-		return "无密码(GetEcsPassword未返回)", nil
+		return "无密码(GetEcsPassword未返回)", nil, nil
 	}
 	ips := candidateIPs(cfg, vm)
 	if len(ips) == 0 {
-		return "无可用IP", nil
+		return "无可用IP", nil, nil
 	}
 	var lastErr error
 	for _, ip := range ips {
-		status, err := trySSH(cfg, ip, vm.Password)
+		status, services, err := trySSH(cfg, ip, vm.Password)
 		if err == nil {
-			return "✓ 成功 (" + ip + ")", status
+			return "✓ 成功 (" + ip + ")", status, services
 		}
 		lastErr = err
 	}
-	return "✗ " + classifySSHErr(lastErr), nil
+	return "✗ " + classifySSHErr(lastErr), nil, nil
 }
 
 // candidateIPs 按配置选择测试用的 IP
@@ -92,8 +93,8 @@ func candidateIPs(cfg *Config, vm *VM) []string {
 	}
 }
 
-// trySSH 用 root+密码 连接，执行验证命令；开启采集时再执行状态采集命令
-func trySSH(cfg *Config, ip, password string) (*ServerStatus, error) {
+// trySSH 用 root+密码 连接，执行验证命令；开启采集时再执行状态采集与服务检查
+func trySSH(cfg *Config, ip, password string) (*ServerStatus, []ServiceStatus, error) {
 	addr := net.JoinHostPort(ip, strconv.Itoa(cfg.SSH.Port))
 	timeout := cfg.SSHSingleTimeout()
 
@@ -106,13 +107,13 @@ func trySSH(cfg *Config, ip, password string) (*ServerStatus, error) {
 
 	conn, err := net.DialTimeout("tcp", addr, timeout)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer conn.Close()
 
 	sshConn, chans, reqs, err := ssh.NewClientConn(conn, addr, clientCfg)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer sshConn.Close()
 
@@ -121,29 +122,102 @@ func trySSH(cfg *Config, ip, password string) (*ServerStatus, error) {
 
 	session, err := client.NewSession()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer session.Close()
 
 	if _, err := session.Output(cfg.SSH.VerifyCommand); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	if !cfg.CheckStatusEnabled() {
-		return nil, nil
+	var status *ServerStatus
+	if cfg.CheckStatusEnabled() {
+		status = collectServerStatus(client)
 	}
-	// 重新开 session 采集运行状态
-	session2, err := client.NewSession()
+	var services []ServiceStatus
+	if cfg.CheckServicesEnabled() {
+		services = collectServiceStatus(client, cfg.ServiceNames())
+	}
+	return status, services, nil
+}
+
+// collectServerStatus 采集服务器运行状态（尽力而为，失败不阻塞）
+func collectServerStatus(client *ssh.Client) *ServerStatus {
+	session, err := client.NewSession()
 	if err != nil {
-		return nil, err
+		return nil
 	}
-	defer session2.Close()
-	out, err := session2.Output(statusCommand)
+	defer session.Close()
+	out, _ := session.Output(statusCommand)
+	return parseStatus(string(out))
+}
+
+// collectServiceStatus 检查服务运行状态（尽力而为，失败不阻塞）
+func collectServiceStatus(client *ssh.Client, names []string) []ServiceStatus {
+	cmd := serviceCheckCommand(names)
+	if cmd == "" {
+		return nil
+	}
+	session, err := client.NewSession()
 	if err != nil {
-		// 登录成功但状态采集失败：仍视为登录成功，返回已解析的部分状态
-		return parseStatus(string(out)), nil
+		return nil
 	}
-	return parseStatus(string(out)), nil
+	defer session.Close()
+	out, _ := session.Output(cmd)
+	return parseServices(string(out))
+}
+
+// serviceCheckCommand 生成服务状态检查命令（systemd/systemctl 优先，兼容 SysV service）
+// 服务名只允许字母数字与 - _ .，防止注入
+func serviceCheckCommand(names []string) string {
+	valid := make([]string, 0, len(names))
+	for _, n := range names {
+		n = strings.TrimSpace(n)
+		if n == "" {
+			continue
+		}
+		ok := true
+		for _, r := range n {
+			if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.') {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			valid = append(valid, n)
+		}
+	}
+	if len(valid) == 0 {
+		return ""
+	}
+	list := strings.Join(valid, " ")
+	return `for s in ` + list + `; do
+  st="unknown"
+  if command -v systemctl >/dev/null 2>&1; then
+    st=$(systemctl is-active "$s" 2>/dev/null)
+    [ -z "$st" ] && st="not-found"
+  elif command -v service >/dev/null 2>&1; then
+    if service "$s" status >/dev/null 2>&1; then st="active"; else st="inactive"; fi
+  fi
+  echo "$s=$st"
+done`
+}
+
+// parseServices 解析服务状态输出（每行: 服务名=状态）
+func parseServices(out string) []ServiceStatus {
+	var svcs []ServiceStatus
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		svcs = append(svcs, ServiceStatus{Name: parts[0], State: parts[1]})
+	}
+	return svcs
 }
 
 // classifySSHErr 将错误归类为易读的失败原因

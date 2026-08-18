@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // 模拟 statusCommand 输出（Kylin/OpenEuler 类系统）
 const sampleStatusOutput = `===OS===
@@ -53,5 +56,46 @@ func TestParseStatusEmpty(t *testing.T) {
 	st := parseStatus("")
 	if st.OS != "" || st.CPUUsed != "" || st.DiskUsePct != "" {
 		t.Errorf("空输出应返回空状态: %+v", st)
+	}
+}
+
+func TestParseServices(t *testing.T) {
+	out := "sshd=active\ncrond=inactive\ndocker=not-found\nnfs=unknown\n"
+	svcs := parseServices(out)
+	if len(svcs) != 4 {
+		t.Fatalf("服务数量错误: %d", len(svcs))
+	}
+	want := []ServiceStatus{
+		{"sshd", "active"},
+		{"crond", "inactive"},
+		{"docker", "not-found"},
+		{"nfs", "unknown"},
+	}
+	for i, w := range want {
+		if svcs[i] != w {
+			t.Errorf("第%d个服务解析错误: got=%+v want=%+v", i, svcs[i], w)
+		}
+	}
+	if got := serviceStateLabel("active"); got != "运行中" {
+		t.Errorf("active 映射错误: %s", got)
+	}
+	if got := serviceStateLabel("failed"); got != "异常" {
+		t.Errorf("failed 映射错误: %s", got)
+	}
+}
+
+func TestServiceCheckCommand(t *testing.T) {
+	cmd := serviceCheckCommand([]string{"sshd", "crond", "bad;rm -rf /", ""})
+	if strings.Contains(cmd, "rm") {
+		t.Errorf("非法服务名未被过滤: %s", cmd)
+	}
+	if !strings.Contains(cmd, "sshd") || !strings.Contains(cmd, "crond") {
+		t.Errorf("合法服务名缺失: %s", cmd)
+	}
+	if strings.Contains(cmd, "bad") {
+		t.Errorf("非法服务名应被剔除: %s", cmd)
+	}
+	if serviceCheckCommand(nil) != "" {
+		t.Errorf("空列表应返回空命令")
 	}
 }

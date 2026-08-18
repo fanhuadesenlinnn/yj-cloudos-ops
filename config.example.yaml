@@ -31,6 +31,11 @@ ssh:
   verifyCommand: "echo ok"   # 登录成功后执行的验证命令
   useIp: internal      # 用哪个IP测试: internal=内网IP / eip=弹性公网IP / internal-then-eip=先内网后EIP
   checkStatus: true    # 登录成功后采集服务器运行状态(OS/内核/负载/CPU/内存/磁盘)，true/false，未配置默认true
+  checkServices: true  # 登录成功后检查服务运行状态，true/false，未配置默认true
+  services:            # 要检查的服务名列表；留空默认检查 sshd，如 sshd/crond/docker/nginx
+    - sshd
+    # - crond
+    # - docker
 
 # 接口原始返回数据保存目录，留空则不保存
 # 目录结构: raw.dir/<运行时间戳>/<Action>[_p<页码>].json
