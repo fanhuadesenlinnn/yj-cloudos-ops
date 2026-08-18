@@ -19,7 +19,12 @@ type Config struct {
 	HTTP               HTTPCfg       `yaml:"http"`
 	Pagination         PaginationCfg `yaml:"pagination"`
 	SSH                SSHCfg        `yaml:"ssh"`
+	Raw                RawCfg        `yaml:"raw"`
 	Output             OutputCfg     `yaml:"output"`
+}
+
+type RawCfg struct {
+	Dir string `yaml:"dir"` // 接口原始返回数据保存目录，留空则不保存
 }
 
 type ProjectCfg struct {

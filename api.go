@@ -11,8 +11,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -63,6 +66,10 @@ type Client struct {
 	sk         string
 	regionID   string
 	httpClient *http.Client
+
+	rawDir    string // 原始返回数据保存目录（可配置，空则不保存）
+	rawRunDir string // 本次运行的实际保存子目录（含时间戳）
+	rawOnce   sync.Once
 }
 
 func newClient(cfg *Config) *Client {
@@ -75,6 +82,7 @@ func newClient(cfg *Config) *Client {
 		sk:         cfg.AccessKeySecret,
 		regionID:   cfg.RegionID,
 		httpClient: &http.Client{Transport: tr, Timeout: cfg.HTTPTimeout()},
+		rawDir:     cfg.Raw.Dir,
 	}
 }
 
@@ -120,6 +128,7 @@ func (c *Client) doGET(path string, extra map[string]string, out interface{}) er
 	if err != nil {
 		return fmt.Errorf("读取响应失败: %w", err)
 	}
+	c.saveRaw(params, body) // 原始返回数据保存（可配置，成功/失败响应都会保存）
 	if resp.StatusCode != http.StatusOK {
 		return apiError(resp.StatusCode, body)
 	}
@@ -149,6 +158,44 @@ func apiError(status int, body []byte) error {
 		return fmt.Errorf("HTTP %d: API错误: %s %s %s", status, e.Code, e.Message, e.Msg)
 	}
 	return fmt.Errorf("HTTP %d: %s", status, truncate(string(body), 500))
+}
+
+// saveRaw 将接口原始返回数据保存到 raw.dir/<运行时间戳>/<Action>[_p<页码>].json
+func (c *Client) saveRaw(params map[string]string, body []byte) {
+	if c.rawDir == "" || len(body) == 0 {
+		return
+	}
+	runDir := c.ensureRawDir()
+	if runDir == "" {
+		return
+	}
+	action := params["Action"]
+	if action == "" {
+		action = "unknown"
+	}
+	name := action
+	if page := params["Page"]; page != "" {
+		name += "_p" + page
+	}
+	name += ".json"
+	if err := os.WriteFile(filepath.Join(runDir, name), body, 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "警告: 保存原始数据 %s 失败: %v\n", name, err)
+	}
+}
+
+// ensureRawDir 按运行时间戳创建原始数据保存目录（只创建一次）
+func (c *Client) ensureRawDir() string {
+	c.rawOnce.Do(func() {
+		sub := time.Now().Format("20060102-150405")
+		dir := filepath.Join(c.rawDir, sub)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			fmt.Fprintf(os.Stderr, "警告: 创建原始数据目录 %s 失败: %v\n", dir, err)
+			return
+		}
+		c.rawRunDir = dir
+		fmt.Fprintf(os.Stderr, "接口原始返回数据保存目录: %s\n", dir)
+	})
+	return c.rawRunDir
 }
 
 func truncate(s string, n int) string {
@@ -218,7 +265,7 @@ type VM struct {
 // ---------- GetProjectList ----------
 
 type projectListResp struct {
-	TotalCount int            `json:"TotalCount"`
+	TotalCount int              `json:"TotalCount"`
 	Data       []map[string]any `json:"Data"`
 }
 
@@ -292,11 +339,11 @@ func mustNumber(n json.Number) int64 {
 // ---------- DescribeEcs ----------
 
 type ecsListResp struct {
-	Page       int        `json:"page"`
-	Size       int        `json:"size"`
-	TotalCount int        `json:"totalCount"`
-	TotalPages int        `json:"totalPages"`
-	List       []ecsItem  `json:"list"`
+	Page       int       `json:"page"`
+	Size       int       `json:"size"`
+	TotalCount int       `json:"totalCount"`
+	TotalPages int       `json:"totalPages"`
+	List       []ecsItem `json:"list"`
 }
 
 type ecsItem struct {
@@ -350,9 +397,9 @@ func (c *Client) getEcsPassword(region, instanceID string) (string, error) {
 // ---------- DescribeEnis ----------
 
 type eniResp struct {
-	Page       int        `json:"page"`
-	TotalPages int        `json:"totalPages"`
-	List       []eniItem  `json:"list"`
+	Page       int       `json:"page"`
+	TotalPages int       `json:"totalPages"`
+	List       []eniItem `json:"list"`
 }
 
 type eniItem struct {

@@ -26,6 +26,12 @@ ssh:
   verifyCommand: "echo ok"   # 登录成功后执行的验证命令
   useIp: internal      # 用哪个IP测试: internal=内网IP / eip=弹性公网IP / internal-then-eip=先内网后EIP
 
+# 接口原始返回数据保存目录，留空则不保存
+# 目录结构: raw.dir/<运行时间戳>/<Action>[_p<页码>].json
+# 注意: 原始数据可能包含 root 密码等敏感信息，注意保管
+raw:
+  dir: ""
+
 output:
   showPassword: true   # 屏幕是否显示密码，false 则显示 ******
   csvPath: ""          # 留空不导出CSV，如 "result.csv"

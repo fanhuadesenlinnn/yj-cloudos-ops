@@ -46,6 +46,7 @@ git push origin v1.0.0
 | `project.name` | 虚拟机所属项目名称 |
 | `ssh.useIp` | `internal` / `eip` / `internal-then-eip` |
 | `output.csvPath` / `output.excelPath` | 留空则不导出 |
+| `raw.dir` | 接口原始返回数据保存目录，留空则不保存；保存为 `raw.dir/<运行时间戳>/<Action>[_p<页码>].json`，**可能含密码等敏感信息** |
 
 ## 运行
 
