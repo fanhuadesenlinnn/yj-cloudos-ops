@@ -4,8 +4,12 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 )
+
+var reDiskSize = regexp.MustCompile(`^([0-9.]+)\s*([TtGgMm])?$`)
 
 var (
 	version      = "dev"
@@ -62,7 +66,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "获取虚拟机失败: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Fprintf(os.Stderr, "共 %d 台虚拟机\n", len(vms))
+	fmt.Fprintf(os.Stderr, "共 %d 台服务器\n", len(vms))
 	if len(vms) == 0 {
 		os.Exit(0)
 	}
@@ -90,64 +94,48 @@ func main() {
 	}
 }
 
-// collectVMs 拉取全部主机，按项目过滤（allMode 时不过滤），并补充密码、MAC、磁盘、项目名信息
+// collectVMs 拉取全部服务器（按 resource.type 支持 ECS/BMS/全部），按项目过滤，补充密码、MAC、磁盘、项目名
 func collectVMs(c *Client, cfg *Config, projects []*Project, allMode bool) ([]*VM, error) {
 	projectSet := map[string]bool{}
 	for _, p := range projects {
 		projectSet[p.ID] = true
 	}
-
-	// 2.1 DescribeEcs 分页拉全量，按项目过滤（接口不支持按项目查询）
-	var vms []*VM
 	pageSize := cfg.Pagination.PageSize
-	page := 1
-	for {
-		resp, err := c.describeEcs(cfg.RegionID, page, pageSize)
+
+	// 2.1 按资源类型拉取 ECS / 裸金属
+	var vms []*VM
+	switch cfg.Resource.Type {
+	case "bms":
+		bms, err := collectBMS(c, cfg, projectSet, allMode, pageSize)
 		if err != nil {
-			return nil, fmt.Errorf("DescribeEcs 第%d页失败: %w", page, err)
+			return nil, err
 		}
-		for _, item := range resp.List {
-			if !allMode && !projectSet[item.ProjectID] {
-				continue
-			}
-			vms = append(vms, &VM{
-				ID:        item.InstanceID,
-				Name:      item.InstanceName,
-				IP:        item.IP,
-				EIP:       item.EipAddr,
-				Status:    item.Status,
-				SpecCode:  item.InstanceCode,
-				SpecName:  item.InstanceCodeName,
-				CPU:       toInt(item.InstanceCPU),
-				Memory:    toInt(item.InstanceMemory),
-				SysDiskID: item.SysDiskID,
-				SysDisk: Disk{
-					ID:       item.SysDiskID,
-					Size:     toInt(item.SysDiskSize),
-					SpecCode: item.SysDiskCode,
-					Type:     "SYSTEM_DISK",
-				},
-				ProjectID: item.ProjectID,
-			})
+		vms = append(vms, bms...)
+	case "all":
+		ecs, err := collectECS(c, cfg, projectSet, allMode, pageSize)
+		if err != nil {
+			return nil, err
 		}
-		if resp.TotalPages <= 0 || page >= resp.TotalPages {
-			break
+		bms, err := collectBMS(c, cfg, projectSet, allMode, pageSize)
+		if err != nil {
+			return nil, err
 		}
-		page++
+		vms = append(vms, ecs...)
+		vms = append(vms, bms...)
+	default: // ecs
+		ecs, err := collectECS(c, cfg, projectSet, allMode, pageSize)
+		if err != nil {
+			return nil, err
+		}
+		vms = append(vms, ecs...)
+	}
+	if len(vms) == 0 {
+		return vms, nil
 	}
 
-	// 2.2 GetEcsPassword 逐台取 root 初始密码
-	for i, vm := range vms {
-		pw, err := c.getEcsPassword(cfg.RegionID, vm.ID)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "警告: 获取 %s 密码失败: %v\n", vm.Name, err)
-			continue
-		}
-		vms[i].Password = pw
-	}
-
-	// 2.3 DescribeEnis 全量拉网卡，按 vmId 取 MAC（尽力而为，接口返回无 macAddr 则留空）
+	// 2.2 DescribeEnis 全量拉网卡，按 vmId/eniId 取 MAC（尽力而为，接口返回无 macAddr 则留空）
 	eniByVM := map[string][]string{}
+	eniByID := map[string]string{}
 	eniPage := 1
 	for {
 		resp, err := c.describeEnis(cfg.RegionID, eniPage, pageSize)
@@ -156,12 +144,15 @@ func collectVMs(c *Client, cfg *Config, projects []*Project, allMode bool) ([]*V
 			break
 		}
 		for _, e := range resp.List {
-			if e.VmID == "" {
+			mac := toStr(e.MacAddr)
+			if mac == "" {
 				continue
 			}
-			mac := toStr(e.MacAddr)
-			if mac != "" {
+			if e.VmID != "" {
 				eniByVM[e.VmID] = append(eniByVM[e.VmID], mac)
+			}
+			if e.InstanceID != "" {
+				eniByID[e.InstanceID] = mac
 			}
 		}
 		if resp.TotalPages <= 0 || eniPage >= resp.TotalPages {
@@ -170,12 +161,21 @@ func collectVMs(c *Client, cfg *Config, projects []*Project, allMode bool) ([]*V
 		eniPage++
 	}
 	for i, vm := range vms {
-		if macs, ok := eniByVM[vm.ID]; ok && len(macs) > 0 {
-			vms[i].MAC = strings.Join(macs, "; ")
+		var macs []string
+		if m, ok := eniByVM[vm.ID]; ok {
+			macs = append(macs, m...)
+		}
+		for _, eid := range vm.EniIDs { // 裸金属网卡
+			if m, ok := eniByID[eid]; ok {
+				macs = append(macs, m)
+			}
+		}
+		if len(macs) > 0 {
+			vms[i].MAC = strings.Join(dedupe(macs), "; ")
 		}
 	}
 
-	// 2.4 DescribeDisks 全量拉云硬盘，按 attachInfos.instanceId 匹配数据盘；同时收集 projectId->项目名称 映射
+	// 2.3 DescribeDisks 全量拉云硬盘，按 attachInfos.instanceId 匹配数据盘；同时收集 projectId->项目名称 映射
 	projectNameByID := map[string]string{}
 	for _, p := range projects {
 		projectNameByID[p.ID] = p.Name
@@ -217,7 +217,9 @@ func collectVMs(c *Client, cfg *Config, projects []*Project, allMode bool) ([]*V
 		diskPage++
 	}
 	for i, vm := range vms {
-		vms[i].DataDisks = diskByVM[vm.ID]
+		if vm.Type != "裸金属" { // 裸金属的本地盘已在 DetailBms 填充
+			vms[i].DataDisks = diskByVM[vm.ID]
+		}
 		vms[i].ProjectName = projectNameByID[vm.ProjectID]
 		if vms[i].ProjectName == "" {
 			vms[i].ProjectName = vm.ProjectID // 未知项目名时显示项目ID
@@ -225,4 +227,165 @@ func collectVMs(c *Client, cfg *Config, projects []*Project, allMode bool) ([]*V
 	}
 
 	return vms, nil
+}
+
+// collectECS 拉取弹性云主机列表并按项目过滤，逐台取密码
+func collectECS(c *Client, cfg *Config, projectSet map[string]bool, allMode bool, pageSize int) ([]*VM, error) {
+	var vms []*VM
+	page := 1
+	for {
+		resp, err := c.describeEcs(cfg.RegionID, page, pageSize)
+		if err != nil {
+			return nil, fmt.Errorf("DescribeEcs 第%d页失败: %w", page, err)
+		}
+		for _, item := range resp.List {
+			if !allMode && !projectSet[item.ProjectID] {
+				continue
+			}
+			vm := &VM{
+				ID:        item.InstanceID,
+				Name:      item.InstanceName,
+				Type:      "虚拟机",
+				IP:        item.IP,
+				EIP:       item.EipAddr,
+				Status:    item.Status,
+				SpecCode:  item.InstanceCode,
+				SpecName:  item.InstanceCodeName,
+				CPU:       toInt(item.InstanceCPU),
+				Memory:    toInt(item.InstanceMemory),
+				SysDiskID: item.SysDiskID,
+				SysDisk: Disk{
+					ID:       item.SysDiskID,
+					Size:     toInt(item.SysDiskSize),
+					SpecCode: item.SysDiskCode,
+					Type:     "SYSTEM_DISK",
+				},
+				ProjectID: item.ProjectID,
+			}
+			vms = append(vms, vm)
+		}
+		if resp.TotalPages <= 0 || page >= resp.TotalPages {
+			break
+		}
+		page++
+	}
+	for i, vm := range vms {
+		pw, err := c.getEcsPassword(cfg.RegionID, vm.ID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "警告: 获取 %s 密码失败: %v\n", vm.Name, err)
+			continue
+		}
+		vms[i].Password = pw
+	}
+	return vms, nil
+}
+
+// collectBMS 拉取裸金属列表并按项目过滤，逐台取密码与详情（结构化数据盘）
+func collectBMS(c *Client, cfg *Config, projectSet map[string]bool, allMode bool, pageSize int) ([]*VM, error) {
+	var vms []*VM
+	page := 1
+	for {
+		resp, err := c.describeBms(cfg.RegionID, page, pageSize)
+		if err != nil {
+			return nil, fmt.Errorf("DescribeBms 第%d页失败: %w", page, err)
+		}
+		for _, item := range resp.List {
+			if !allMode && !projectSet[item.ProjectID] {
+				continue
+			}
+			vm := &VM{
+				ID:           item.InstanceID,
+				Name:         item.InstanceName,
+				Type:         "裸金属",
+				IP:           item.IP,
+				EIP:          item.EipAddr,
+				Status:       item.Status,
+				SpecCode:     item.InstanceCode,
+				SpecName:     item.InstanceCodeName,
+				CPU:          toInt(item.InstanceCPU),
+				Memory:       toInt(item.InstanceMemory),
+				SysDiskDesc:  item.SysDisk,
+				DataDiskDesc: item.DataDisk,
+				ProjectID:    item.ProjectID,
+			}
+			for _, ni := range item.NetworkInterfaces {
+				if ni.EniID != "" {
+					vm.EniIDs = append(vm.EniIDs, ni.EniID)
+				}
+			}
+			vms = append(vms, vm)
+		}
+		if resp.TotalPages <= 0 || page >= resp.TotalPages {
+			break
+		}
+		page++
+	}
+	for i, vm := range vms {
+		pw, err := c.getBmsPassword(cfg.RegionID, vm.ID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "警告: 获取 %s 密码失败: %v\n", vm.Name, err)
+			continue
+		}
+		vms[i].Password = pw
+
+		detail, err := c.detailBms(cfg.RegionID, vm.ID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "警告: 获取 %s 详情失败: %v\n", vm.Name, err)
+			continue
+		}
+		if detail.SysDisk != "" {
+			vms[i].SysDiskDesc = detail.SysDisk
+		}
+		if detail.DataDisk != "" {
+			vms[i].DataDiskDesc = detail.DataDisk
+		}
+		for _, dd := range detail.DataDisks {
+			desc, size := bmsDiskSize(dd.Size)
+			vms[i].DataDisks = append(vms[i].DataDisks, Disk{
+				Size:     size,
+				SizeDesc: desc,
+				Type:     dd.Type,
+				SpecCode: dd.SpecificationCode,
+				SpecName: dd.SpecificationName,
+			})
+		}
+	}
+	return vms, nil
+}
+
+// bmsDiskSize 解析裸金属数据盘容量描述（"100"->"100G", "1.92T" 原样保留）
+func bmsDiskSize(v any) (desc string, size int) {
+	s := strings.TrimSpace(toStr(v))
+	if s == "" {
+		return "", 0
+	}
+	if n, err := strconv.ParseFloat(s, 64); err == nil {
+		return fmt.Sprintf("%.0fG", n), int(n)
+	}
+	if m := reDiskSize.FindStringSubmatch(s); m != nil {
+		if f, err := strconv.ParseFloat(m[1], 64); err == nil {
+			mult := 1.0
+			switch strings.ToUpper(m[2]) {
+			case "T":
+				mult = 1024
+			case "M":
+				mult = 1.0 / 1024
+			}
+			return s, int(f * mult)
+		}
+	}
+	return s, 0
+}
+
+// dedupe 字符串去重（保持顺序）
+func dedupe(items []string) []string {
+	seen := map[string]bool{}
+	out := items[:0]
+	for _, it := range items {
+		if !seen[it] {
+			seen[it] = true
+			out = append(out, it)
+		}
+	}
+	return out
 }

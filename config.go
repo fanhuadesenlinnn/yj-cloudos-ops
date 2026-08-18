@@ -16,6 +16,7 @@ type Config struct {
 	AccessKeySecret    string        `yaml:"accessKeySecret"`    // 平台凭证 SK
 	RegionID           string        `yaml:"regionId"`           // 区域ID
 	Project            ProjectCfg    `yaml:"project"`
+	Resource           ResourceCfg   `yaml:"resource"`
 	HTTP               HTTPCfg       `yaml:"http"`
 	Pagination         PaginationCfg `yaml:"pagination"`
 	SSH                SSHCfg        `yaml:"ssh"`
@@ -30,6 +31,11 @@ type RawCfg struct {
 type ProjectCfg struct {
 	Name  string   `yaml:"name"`  // 兼容单个项目（旧配置）
 	Names []string `yaml:"names"` // 多个项目名称；含 "*" 或 "all" 表示全部项目
+}
+
+// ResourceCfg 检查的资源类型
+type ResourceCfg struct {
+	Type string `yaml:"type"` // ecs(默认) / bms / all
 }
 
 type HTTPCfg struct {
@@ -80,6 +86,14 @@ func loadConfig(path string) (*Config, error) {
 	}
 	if cfg.Project.Name == "" && len(cfg.Project.Names) == 0 {
 		return nil, fmt.Errorf("缺少配置 project.name / project.names")
+	}
+	switch cfg.Resource.Type {
+	case "", "ecs", "bms", "all":
+		if cfg.Resource.Type == "" {
+			cfg.Resource.Type = "ecs"
+		}
+	default:
+		return nil, fmt.Errorf("resource.type 取值非法: %s（支持 ecs / bms / all）", cfg.Resource.Type)
 	}
 	if cfg.Pagination.PageSize <= 0 {
 		cfg.Pagination.PageSize = 100

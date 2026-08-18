@@ -15,11 +15,12 @@ import (
 
 func outputTable(cfg *Config, vms []*VM) error {
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "序号\t名称\t内网IP\tEIP\tMAC\t规格\t系统盘\t数据盘\t项目\t密码\tSSH登录\t运行状态\t服务状态")
+	fmt.Fprintln(w, "序号\t名称\t类型\t内网IP\tEIP\tMAC\t规格\t系统盘\t数据盘\t项目\t密码\tSSH登录\t运行状态\t服务状态")
 	for i, vm := range vms {
-		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			i+1,
 			orDash(vm.Name),
+			orDash(vm.Type),
 			orDash(vm.IP),
 			orDash(vm.EIP),
 			orDash(vm.MAC),
@@ -103,6 +104,9 @@ func specStr(vm *VM) string {
 }
 
 func sysDiskStr(vm *VM) string {
+	if vm.SysDiskDesc != "" {
+		return vm.SysDiskDesc // 裸金属等：字符串描述，如 "600G HDD*2"
+	}
 	if vm.SysDisk.Size <= 0 {
 		return "—"
 	}
@@ -115,24 +119,37 @@ func sysDiskStr(vm *VM) string {
 
 func dataDiskStr(vm *VM) string {
 	if len(vm.DataDisks) == 0 {
+		if vm.DataDiskDesc != "" {
+			return vm.DataDiskDesc // 裸金属等：字符串描述
+		}
 		return "—"
 	}
 	parts := make([]string, 0, len(vm.DataDisks))
 	for _, d := range vm.DataDisks {
 		t := diskShortType(d)
-		if d.Name != "" {
-			if t == "" {
-				parts = append(parts, fmt.Sprintf("%s:%dG", d.Name, d.Size))
-			} else {
-				parts = append(parts, fmt.Sprintf("%s:%dG/%s", d.Name, d.Size, t))
-			}
-		} else {
-			if t == "" {
-				parts = append(parts, fmt.Sprintf("%dG", d.Size))
-			} else {
-				parts = append(parts, fmt.Sprintf("%dG/%s", d.Size, t))
-			}
+		size := fmt.Sprintf("%dG", d.Size)
+		if d.SizeDesc != "" {
+			size = d.SizeDesc
+		} else if d.Size <= 0 {
+			size = ""
 		}
+		name := d.Name
+		var one string
+		switch {
+		case name != "" && t != "" && size != "":
+			one = fmt.Sprintf("%s:%s/%s", name, size, t)
+		case name != "" && size != "":
+			one = fmt.Sprintf("%s:%s", name, size)
+		case size != "" && t != "":
+			one = fmt.Sprintf("%s/%s", size, t)
+		case size != "":
+			one = size
+		case t != "":
+			one = t
+		default:
+			one = "?"
+		}
+		parts = append(parts, one)
 	}
 	return strings.Join(parts, " + ")
 }
@@ -220,8 +237,8 @@ func exportCSV(cfg *Config, vms []*VM) error {
 	w := csv.NewWriter(f)
 	defer w.Flush()
 
-	header := []string{"序号", "虚拟机名称", "实例ID", "内网IP", "EIP", "MAC", "状态",
-		"规格编码", "规格描述", "CPU核数", "内存G", "系统盘大小G", "系统盘类型",
+	header := []string{"序号", "虚拟机名称", "类型", "实例ID", "内网IP", "EIP", "MAC", "状态",
+		"规格编码", "规格描述", "CPU核数", "内存G", "系统盘大小G", "系统盘类型", "系统盘描述",
 		"数据盘", "项目名称", "项目ID", "root密码", "SSH登录结果", "服务状态",
 		"操作系统", "内核版本", "运行时长", "负载(1/5/15)",
 		"CPU使用率%", "内存总量", "内存已用", "内存使用率%",
@@ -233,6 +250,7 @@ func exportCSV(cfg *Config, vms []*VM) error {
 		row := []string{
 			itoa(i + 1),
 			vm.Name,
+			vm.Type,
 			vm.ID,
 			vm.IP,
 			vm.EIP,
@@ -244,6 +262,7 @@ func exportCSV(cfg *Config, vms []*VM) error {
 			itoa(vm.Memory),
 			itoa(vm.SysDisk.Size),
 			diskShortType(vm.SysDisk),
+			vm.SysDiskDesc,
 			dataDiskStr(vm),
 			vm.ProjectName,
 			vm.ProjectID,
@@ -281,8 +300,8 @@ func exportExcel(cfg *Config, vms []*VM) error {
 	sheet := "虚拟机清单"
 	f.SetSheetName("Sheet1", sheet)
 
-	header := []string{"序号", "虚拟机名称", "实例ID", "内网IP", "EIP", "MAC", "状态",
-		"规格编码", "规格描述", "CPU核数", "内存G", "系统盘大小G", "系统盘类型",
+	header := []string{"序号", "虚拟机名称", "类型", "实例ID", "内网IP", "EIP", "MAC", "状态",
+		"规格编码", "规格描述", "CPU核数", "内存G", "系统盘大小G", "系统盘类型", "系统盘描述",
 		"数据盘", "项目名称", "项目ID", "root密码", "SSH登录结果"}
 	style, _ := f.NewStyle(&excelize.Style{Font: &excelize.Font{Bold: true}})
 	writeHeader(f, sheet, header, style)
@@ -291,6 +310,7 @@ func exportExcel(cfg *Config, vms []*VM) error {
 		row := []any{
 			i + 1,
 			vm.Name,
+			vm.Type,
 			vm.ID,
 			vm.IP,
 			vm.EIP,
@@ -302,6 +322,7 @@ func exportExcel(cfg *Config, vms []*VM) error {
 			vm.Memory,
 			vm.SysDisk.Size,
 			diskShortType(vm.SysDisk),
+			vm.SysDiskDesc,
 			dataDiskStr(vm),
 			vm.ProjectName,
 			vm.ProjectID,

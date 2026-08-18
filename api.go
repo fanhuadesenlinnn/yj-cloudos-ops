@@ -241,7 +241,8 @@ type Disk struct {
 	ID       string
 	Name     string
 	Size     int
-	Type     string // diskType: DATA_DISK / SYSTEM_DISK
+	SizeDesc string // 原始大小描述（裸金属等无数字大小时使用，优先展示）
+	Type     string // diskType: DATA_DISK / SYSTEM_DISK / local / cloud / shared
 	SpecCode string
 	SpecName string
 	Status   string
@@ -270,6 +271,7 @@ type ServiceStatus struct {
 type VM struct {
 	ID           string
 	Name         string
+	Type         string // 虚拟机 / 裸金属
 	IP           string
 	EIP          string
 	MAC          string
@@ -280,6 +282,8 @@ type VM struct {
 	Memory       int
 	SysDiskID    string
 	SysDisk      Disk
+	SysDiskDesc  string // 系统盘描述（裸金属为字符串描述，如 "600G HDD*2"，优先展示）
+	DataDiskDesc string // 数据盘描述（裸金属兜底展示）
 	DataDisks    []Disk
 	Password     string
 	SSHResult    string
@@ -287,6 +291,7 @@ type VM struct {
 	ProjectName  string
 	ServerStatus *ServerStatus   // SSH 登录成功后采集的服务器运行状态
 	Services     []ServiceStatus // SSH 登录成功后检查的服务运行状态
+	EniIDs       []string        // 裸金属网卡ID（用于反查 MAC）
 }
 
 // ---------- GetProjectList ----------
@@ -573,6 +578,81 @@ func (c *Client) diskProjectCatalog(cfg *Config) ([]*Project, error) {
 		page++
 	}
 	return projects, nil
+}
+
+// ---------- DescribeBms / DetailBms / GetBmsPassword（裸金属） ----------
+
+type bmsListResp struct {
+	Page       int       `json:"page"`
+	TotalPages int       `json:"totalPages"`
+	List       []bmsItem `json:"list"`
+}
+
+type bmsItem struct {
+	InstanceID        string `json:"instanceId"`
+	InstanceName      string `json:"instanceName"`
+	InstanceCode      string `json:"instanceCode"`
+	InstanceCodeName  string `json:"instanceCodeName"`
+	Status            string `json:"status"`
+	IP                string `json:"ip"`
+	EipID             string `json:"eipId"`
+	EipAddr           string `json:"eipAddr"`
+	ProjectID         string `json:"projectId"`
+	InstanceCPU       any    `json:"instanceCpu"`
+	InstanceMemory    any    `json:"instanceMemory"`
+	SysDisk           string `json:"sysDisk"`
+	DataDisk          string `json:"dataDisk"`
+	NetworkInterfaces []struct {
+		IP    string `json:"ip"`
+		EniID string `json:"eniId"`
+		Bond  string `json:"bond"`
+	} `json:"networkInterfaces"`
+}
+
+func (c *Client) describeBms(region string, page, size int) (*bmsListResp, error) {
+	resp := &bmsListResp{}
+	err := c.doGET("/compute/bms", map[string]string{
+		"Action":   "DescribeBms",
+		"RegionId": region,
+		"Page":     itoa(page),
+		"Size":     itoa(size),
+	}, resp)
+	return resp, err
+}
+
+// bmsDetailResp DetailBms 返回（含结构化 dataDisks）
+type bmsDetailResp struct {
+	DataDisks []struct {
+		Type              string `json:"type"`
+		SpecificationCode string `json:"specificationCode"`
+		SpecificationName string `json:"specificationName"`
+		Size              any    `json:"size"`
+	} `json:"dataDisks"`
+	SysDisk  string `json:"sysDisk"`
+	DataDisk string `json:"dataDisk"`
+}
+
+func (c *Client) detailBms(region, instanceID string) (*bmsDetailResp, error) {
+	resp := &bmsDetailResp{}
+	err := c.doGET("/compute/bms", map[string]string{
+		"Action":     "DetailBms",
+		"RegionId":   region,
+		"InstanceId": instanceID,
+	}, resp)
+	return resp, err
+}
+
+func (c *Client) getBmsPassword(region, instanceID string) (string, error) {
+	resp := &pwdResp{}
+	err := c.doGET("/compute/bms", map[string]string{
+		"Action":     "GetBmsPassword",
+		"RegionId":   region,
+		"InstanceId": instanceID,
+	}, resp)
+	if err != nil {
+		return "", err
+	}
+	return resp.Password, nil
 }
 
 // ---------- 工具 ----------

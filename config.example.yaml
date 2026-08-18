@@ -8,6 +8,10 @@ accessKeySecret: "your-access-key-secret"
 
 regionId: "cn-beijing"
 
+# 检查的资源类型: ecs(默认,弹性云主机) / bms(裸金属) / all(两者都查)
+resource:
+  type: "ecs"
+
 # 虚拟机所属项目（按名称匹配，同名多项目时程序会列出让您选择）
 # names 支持多个项目；填 "*" 或 "all" 表示检查全部项目
 # 兼容旧的单项目配置 project.name

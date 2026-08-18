@@ -2,7 +2,7 @@
 
 CloudOS 7.0 虚拟机检查工具（Golang）
 
-按项目检查云平台上所有虚拟机：IP / MAC / 名称 / 所属项目 / root 密码 / 规格 / 磁盘大小（含多块数据盘），
+按项目检查云平台上所有服务器（虚拟机 / 裸金属）：IP / MAC / 名称 / 所属项目 / root 密码 / 规格 / 磁盘大小（含多块数据盘），
 并用 IP + 密码测试 SSH 是否能正常登录；登录成功后采集服务器运行状态（OS/负载/CPU/内存/磁盘）
 并检查服务运行状态（如 sshd/docker）。结果默认显示到屏幕，可配置导出 CSV / Excel。
 
@@ -46,6 +46,7 @@ git push origin v1.0.0
 | `insecureSkipVerify` | 是否跳过证书校验 |
 | `accessKeyId` / `accessKeySecret` | 平台凭证，控制台 -> 统一身份认证 -> 访问秘钥 |
 | `regionId` | 区域ID，如 cn-beijing |
+| `resource.type` | 检查的资源类型：`ecs`(默认) / `bms`(裸金属) / `all` |
 | `project.name` / `project.names` | 虚拟机所属项目名称（names 支持多个；填 `*` 或 `all` 检查全部项目） |
 | `ssh.useIp` | `internal` / `eip` / `internal-then-eip` |
 | `ssh.checkStatus` | 登录成功后采集服务器运行状态（OS/内核/负载/CPU/内存/磁盘），默认 true |
