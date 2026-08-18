@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -22,6 +23,11 @@ type Config struct {
 	SSH                SSHCfg        `yaml:"ssh"`
 	Raw                RawCfg        `yaml:"raw"`
 	Output             OutputCfg     `yaml:"output"`
+
+	// 脚本内容缓存（ssh.script / ssh.scriptPath），并发 worker 只加载一次
+	scriptOnce    sync.Once
+	scriptContent string
+	scriptErr     error
 }
 
 type RawCfg struct {
@@ -57,12 +63,16 @@ type SSHCfg struct {
 	CheckStatus   *bool    `yaml:"checkStatus"`   // 登录成功后采集服务器运行状态（CPU/内存/磁盘/负载/OS），未配置默认 true
 	CheckServices *bool    `yaml:"checkServices"` // 登录成功后检查服务运行状态，未配置默认 true
 	Services      []string `yaml:"services"`      // 要检查的服务名列表；留空默认检查 sshd
+	Script        string   `yaml:"script"`        // 内嵌脚本内容（多行），与 scriptPath 二选一
+	ScriptPath    string   `yaml:"scriptPath"`    // 本地脚本文件路径，与 script 二选一
+	ScriptTimeout string   `yaml:"scriptTimeout"` // 单台脚本执行超时，默认 60s
 }
 
 type OutputCfg struct {
 	ShowPassword bool   `yaml:"showPassword"` // 屏幕是否显示密码，默认 true
 	CSVPath      string `yaml:"csvPath"`      // 为空则不导出 CSV
 	ExcelPath    string `yaml:"excelPath"`    // 为空则不导出 Excel
+	ScriptDir    string `yaml:"scriptDir"`    // 脚本输出落盘目录（留空不落盘），目录结构 scriptDir/<运行时间戳>/<机器名>_<IP>.log
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -119,6 +129,9 @@ func loadConfig(path string) (*Config, error) {
 	default:
 		return nil, fmt.Errorf("ssh.useIp 取值非法: %s（支持 internal / eip / internal-then-eip）", cfg.SSH.UseIP)
 	}
+	if cfg.SSH.Script != "" && cfg.SSH.ScriptPath != "" {
+		return nil, fmt.Errorf("ssh.script 与 ssh.scriptPath 只能配置一个")
+	}
 	return cfg, nil
 }
 
@@ -138,6 +151,34 @@ func (c *Config) ServiceNames() []string {
 		return []string{"sshd"}
 	}
 	return c.SSH.Services
+}
+
+// ScriptEnabled 是否配置了脚本执行（ssh.script / ssh.scriptPath）
+func (c *Config) ScriptEnabled() bool {
+	return c.SSH.Script != "" || c.SSH.ScriptPath != ""
+}
+
+// ScriptTimeoutDuration 单台脚本执行超时（默认 60s）
+func (c *Config) ScriptTimeoutDuration() time.Duration {
+	return parseDuration(c.SSH.ScriptTimeout, 60*time.Second)
+}
+
+// ScriptContent 获取脚本内容：优先 scriptPath 读取本地文件，否则返回内嵌 script。
+// 通过 sync.Once 只加载一次，供并发 worker 安全调用。
+func (c *Config) ScriptContent() (string, error) {
+	c.scriptOnce.Do(func() {
+		if c.SSH.ScriptPath != "" {
+			data, err := os.ReadFile(c.SSH.ScriptPath)
+			if err != nil {
+				c.scriptErr = fmt.Errorf("读取脚本文件 %s 失败: %w", c.SSH.ScriptPath, err)
+				return
+			}
+			c.scriptContent = string(data)
+			return
+		}
+		c.scriptContent = c.SSH.Script
+	})
+	return c.scriptContent, c.scriptErr
 }
 
 // HTTPTimeout 解析 HTTP 超时

@@ -201,11 +201,13 @@ func (c *Client) ensureRawDir() string {
 	return c.rawRunDir
 }
 
+// truncate 按字符数截断字符串（避免切断多字节字符），超出加省略号
 func truncate(s string, n int) string {
-	if len(s) <= n {
+	r := []rune(s)
+	if len(r) <= n {
 		return s
 	}
-	return s[:n] + "..."
+	return string(r[:n]) + "…"
 }
 
 // ---------- 数据模型 ----------
@@ -268,6 +270,16 @@ type ServiceStatus struct {
 	State string // 原始状态: active/inactive/failed/unknown/not-found
 }
 
+// ScriptResult 脚本执行结果（配置了 ssh.script / ssh.scriptPath 时执行）
+type ScriptResult struct {
+	OK        bool   // 是否执行成功（退出码 0 且无错误）
+	ExitCode  int    // 远端退出码；-1 表示未能获取（如会话中断/创建失败）
+	Output    string // 脚本输出（stdout+stderr 合并；超过上限时截断并置 Truncated）
+	Error     string // 错误信息（失败原因 / 超时 / 会话中断）
+	State     string // 结果分类: success / fail / timeout / interrupted / error
+	Truncated bool   // 输出是否因超过上限被截断
+}
+
 type VM struct {
 	ID           string
 	Name         string
@@ -291,6 +303,7 @@ type VM struct {
 	ProjectName  string
 	ServerStatus *ServerStatus   // SSH 登录成功后采集的服务器运行状态
 	Services     []ServiceStatus // SSH 登录成功后检查的服务运行状态
+	Script       *ScriptResult   // SSH 登录成功后执行的脚本结果（未配置脚本为 nil）
 	EniIDs       []string        // 裸金属网卡ID（用于反查 MAC）
 }
 

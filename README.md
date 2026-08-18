@@ -11,6 +11,10 @@ CloudOS 7.0 虚拟机检查工具（Golang）
 - 项目按名称传入，支持**多项目**（`project.names`）与**全部项目**（`*` / `all`），同名多项目时屏幕列出供用户选择
 - 服务器运行状态：CPU / 内存 / 磁盘使用率、负载、运行时长、OS、内核，屏幕展示摘要，Excel 单独 Sheet 展示明细
 - 服务运行状态：检查 `ssh.services` 配置的服务（如 sshd），屏幕展示 `服务名:运行中/停止/异常`，Excel 单独 Sheet 明细
+- 脚本执行：SSH 登录成功后按需执行脚本（`ssh.script` 内嵌 或 `ssh.scriptPath` 本地文件），
+  脚本通过 stdin 以 `bash -s` 执行，带超时控制；结果分类为 成功 / 失败(exit N) / 超时 / 会话中断(疑似关机/重启)，
+  失败时 stderr 自动回显输出尾部；屏幕展示摘要，Excel「脚本执行结果」Sheet 存完整输出与退出码，
+  可配置 `output.scriptDir` 按机器落盘完整输出
 - 导出文件路径留空则不导出
 
 ## 构建
@@ -51,7 +55,10 @@ git push origin v1.0.0
 | `ssh.useIp` | `internal` / `eip` / `internal-then-eip` |
 | `ssh.checkStatus` | 登录成功后采集服务器运行状态（OS/内核/负载/CPU/内存/磁盘），默认 true |
 | `ssh.checkServices` / `ssh.services` | 登录成功后检查服务运行状态（如 sshd/docker），默认 true，services 留空默认查 sshd |
-| `output.csvPath` / `output.excelPath` | 留空则不导出；Excel 含「虚拟机清单」「服务器运行状态」两个 Sheet |
+| `ssh.script` / `ssh.scriptPath` | 登录成功后执行的脚本：script 内嵌内容 / scriptPath 本地文件路径（二选一）；通过 stdin 以 `bash -s` 执行，无需上传 |
+| `ssh.scriptTimeout` | 单台脚本执行超时，默认 60s，超时强制中断并标记失败 |
+| `output.csvPath` / `output.excelPath` | 留空则不导出；Excel 含「虚拟机清单」「服务器运行状态」「服务运行状态」「脚本执行结果」四个 Sheet |
+| `output.scriptDir` | 脚本完整输出按机器落盘目录（留空不落盘）；保存为 `scriptDir/<运行时间戳>/<机器名>_<内网IP>.log` |
 | `raw.dir` | 接口原始返回数据保存目录，留空则不保存；保存为 `raw.dir/<运行时间戳>/<Action>[_<实例ID>][_p<页码>].json`，**可能含密码等敏感信息** |
 
 ## 运行
@@ -78,6 +85,15 @@ git push origin v1.0.0
   负载、CPU/内存/磁盘使用率，屏幕展示摘要（CPU 内存 磁盘 负载），Excel「服务器运行状态」Sheet 展示明细。
 - 服务运行状态：SSH 登录成功后检查 `ssh.services` 配置的服务（systemctl 优先，兼容 SysV service），
   屏幕展示 `服务名:运行中/停止/异常/不存在`，Excel「服务运行状态」Sheet 每台虚拟机每个服务一行。
+- 脚本执行：配置 `ssh.script`（内嵌）/ `ssh.scriptPath`（本地文件）后，SSH 登录成功即执行。
+  实现上脚本内容通过 SSH channel 的 stdin 传给远端 `bash -s`（不经 shell 拼接，无转义/注入问题），
+  带脚本级超时（`ssh.scriptTimeout`，默认 60s，超时关闭会话强制中断）。
+  结果按 State 分类：`success` / `fail`(收到退出码，含被信号杀如 kill -9 → 128+N) / `timeout` /
+  `interrupted`(未收到退出码或连接断开，典型如脚本里执行了 `init 0`/`reboot`——命令可能已下发、机器正在关机，
+  故单独标记为"会话中断(疑似关机/重启)"而非"失败") / `error`(未执行，如脚本文件缺失)。
+  失败/超时/会话中断时 stderr 自动回显该台状态、原因与输出尾部（最后 20 行）；单台输出上限 100KB，
+  超出截断保留末尾并标注。屏幕「脚本执行」列显示摘要，Excel「脚本执行结果」Sheet 每台一行存完整输出，
+  可配置 `output.scriptDir` 按机器落盘。以上状态均**不影响** SSH 登录结果标记。
 - 调用接口：
   - `GetProjectList`（/project）按名称解析项目
   - `DescribeEcs`（/compute/ecs/instances）分页拉全量主机，客户端按 projectId 过滤（该接口无项目筛选参数）
@@ -92,6 +108,8 @@ git push origin v1.0.0
 
 ## 注意事项
 
+- 脚本执行：脚本以 root 身份在每台服务器执行，等同于远端任意代码执行能力，请勿在脚本/配置中写入密码等敏感信息；脚本请用 LF 换行（Windows 编辑器的 CRLF 会导致 `bash -s` 报错）；远端需有 bash（本工具状态采集本身也依赖 bash）。
+- 脚本里执行 `init 0` / `reboot` / `shutdown` 等命令会掐断 SSH 会话：拿不到退出码、输出可能不完整，程序会标记为「会话中断(疑似关机/重启)」而非「失败」，这是正常语义，请结合机器实际状态判断；已收到的部分输出会照常保存。
 - Windows 老终端（cmd）中文输出请先执行 `chcp 65001`。
 - 分页大小 `pagination.pageSize` 默认 100，部分平台可能有上限，接口报错时调小（如 10）。
 - 取密码/详情等按实例请求已**并发化**（`http.concurrent`，默认 10，可调大提速），并有进度提示，不再长时间无响应。

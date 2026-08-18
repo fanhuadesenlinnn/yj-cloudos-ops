@@ -73,6 +73,14 @@ func main() {
 		os.Exit(0)
 	}
 
+	// 配置了脚本时提前加载，文件不存在/不可读直接退出，避免每台机器重复报同一个错
+	if cfg.ScriptEnabled() {
+		if _, err := cfg.ScriptContent(); err != nil {
+			fmt.Fprintf(os.Stderr, "加载脚本失败: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
 	// 3. SSH 登录测试 + 服务器运行状态采集（并发，进度输出到 stderr）
 	runSSHTests(cfg, vms)
 

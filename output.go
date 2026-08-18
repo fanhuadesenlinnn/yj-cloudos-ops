@@ -15,9 +15,9 @@ import (
 
 func outputTable(cfg *Config, vms []*VM) error {
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "序号\t名称\t类型\t内网IP\tEIP\tMAC\t规格\t系统盘\t数据盘\t项目\t密码\tSSH登录\t运行状态\t服务状态")
+	fmt.Fprintln(w, "序号\t名称\t类型\t内网IP\tEIP\tMAC\t规格\t系统盘\t数据盘\t项目\t密码\tSSH登录\t运行状态\t服务状态\t脚本执行")
 	for i, vm := range vms {
-		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			i+1,
 			orDash(vm.Name),
 			orDash(vm.Type),
@@ -32,9 +32,62 @@ func outputTable(cfg *Config, vms []*VM) error {
 			vm.SSHResult,
 			statusStr(vm),
 			servicesStr(vm),
+			scriptStr(vm),
 		)
 	}
 	return w.Flush()
+}
+
+// scriptStr 脚本执行摘要（屏幕展示；按 State 分类，错误信息过长时截断）
+func scriptStr(vm *VM) string {
+	s := vm.Script
+	if s == nil {
+		return "—"
+	}
+	switch s.State {
+	case "success":
+		return "✓ 成功"
+	case "fail":
+		return fmt.Sprintf("✗ 失败(exit %d)", s.ExitCode)
+	case "timeout":
+		return "✗ 超时"
+	case "interrupted":
+		return "✗ 会话中断(疑似关机/重启)"
+	case "error":
+		return "✗ " + truncate(s.Error, 30)
+	default: // 兼容未设置 State 的旧结果
+		if s.OK {
+			return "✓ 成功"
+		}
+		if s.Error != "" {
+			return "✗ " + truncate(s.Error, 30)
+		}
+		return fmt.Sprintf("✗ 失败(exit %d)", s.ExitCode)
+	}
+}
+
+// scriptResultLabel 脚本执行结果中文说明（Excel/落盘用，不截断）
+func scriptResultLabel(s *ScriptResult) string {
+	if s == nil {
+		return "未配置脚本"
+	}
+	switch s.State {
+	case "success":
+		return "成功"
+	case "fail":
+		return fmt.Sprintf("失败(exit %d)", s.ExitCode)
+	case "timeout":
+		return "超时"
+	case "interrupted":
+		return "会话中断(疑似关机/重启)"
+	case "error":
+		return "未执行: " + s.Error
+	default:
+		if s.OK {
+			return "成功"
+		}
+		return fmt.Sprintf("失败(exit %d)", s.ExitCode)
+	}
 }
 
 // servicesStr 服务状态摘要（每服务一行内展示: sshd:运行中 crond:停止）
@@ -239,7 +292,7 @@ func exportCSV(cfg *Config, vms []*VM) error {
 
 	header := []string{"序号", "虚拟机名称", "类型", "实例ID", "内网IP", "EIP", "MAC", "状态",
 		"规格编码", "规格描述", "CPU核数", "内存G", "系统盘大小G", "系统盘类型", "系统盘描述",
-		"数据盘", "项目名称", "项目ID", "root密码", "SSH登录结果", "服务状态",
+		"数据盘", "项目名称", "项目ID", "root密码", "SSH登录结果", "服务状态", "脚本执行",
 		"操作系统", "内核版本", "运行时长", "负载(1/5/15)",
 		"CPU使用率%", "内存总量", "内存已用", "内存使用率%",
 		"根分区总量", "根分区已用", "根分区使用率%"}
@@ -269,6 +322,7 @@ func exportCSV(cfg *Config, vms []*VM) error {
 			vm.Password,
 			vm.SSHResult,
 			servicesStr(vm),
+			scriptStr(vm),
 		}
 		row = append(row, statusCSVFields(vm)...)
 		if err := w.Write(row); err != nil {
@@ -302,7 +356,7 @@ func exportExcel(cfg *Config, vms []*VM) error {
 
 	header := []string{"序号", "虚拟机名称", "类型", "实例ID", "内网IP", "EIP", "MAC", "状态",
 		"规格编码", "规格描述", "CPU核数", "内存G", "系统盘大小G", "系统盘类型", "系统盘描述",
-		"数据盘", "项目名称", "项目ID", "root密码", "SSH登录结果"}
+		"数据盘", "项目名称", "项目ID", "root密码", "SSH登录结果", "脚本执行"}
 	style, _ := f.NewStyle(&excelize.Style{Font: &excelize.Font{Bold: true}})
 	writeHeader(f, sheet, header, style)
 
@@ -328,6 +382,7 @@ func exportExcel(cfg *Config, vms []*VM) error {
 			vm.ProjectID,
 			vm.Password,
 			vm.SSHResult,
+			scriptStr(vm),
 		}
 		for j, v := range row {
 			cell, _ := excelize.CoordinatesToCellName(j+1, i+2)
@@ -394,6 +449,32 @@ func exportExcel(cfg *Config, vms []*VM) error {
 		}
 	}
 	if err := f.AutoFilter(svcSheet, "A1:"+cellName(len(svcHeader), svcRow-1), nil); err != nil {
+		return err
+	}
+
+	// 脚本执行结果表（每台虚拟机一行，脚本输出存全文；超限截断时输出自带截断标注）
+	scrSheet := "脚本执行结果"
+	f.NewSheet(scrSheet)
+	scrHeader := []string{"序号", "虚拟机名称", "内网IP", "项目名称", "SSH登录结果",
+		"脚本执行结果", "退出码", "错误信息", "脚本输出"}
+	writeHeader(f, scrSheet, scrHeader, style)
+	scrRow := 2
+	for i, vm := range vms {
+		res, exit, errMsg, out := "未配置脚本", "", "", ""
+		if s := vm.Script; s != nil {
+			res = scriptResultLabel(s)
+			exit = itoa(s.ExitCode)
+			errMsg = s.Error
+			out = s.Output
+		}
+		row := []any{i + 1, vm.Name, vm.IP, vm.ProjectName, vm.SSHResult, res, exit, errMsg, out}
+		for j, v := range row {
+			cell, _ := excelize.CoordinatesToCellName(j+1, scrRow)
+			f.SetCellValue(scrSheet, cell, v)
+		}
+		scrRow++
+	}
+	if err := f.AutoFilter(scrSheet, "A1:"+cellName(len(scrHeader), scrRow-1), nil); err != nil {
 		return err
 	}
 
