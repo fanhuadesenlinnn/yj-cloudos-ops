@@ -15,6 +15,9 @@ CloudOS 7.0 虚拟机检查工具（Golang）
   脚本通过 stdin 以 `bash -s` 执行，带超时控制；结果分类为 成功 / 失败(exit N) / 超时 / 会话中断(疑似关机/重启)，
   失败时 stderr 自动回显输出尾部；屏幕展示摘要，Excel「脚本执行结果」Sheet 存完整输出与退出码，
   可配置 `output.scriptDir` 按机器落盘完整输出
+- 文件上传：SSH 登录成功后按需通过 SFTP 把本地文件传到远端指定路径（`ssh.upload`，支持自动创建父目录），
+  同名文件默认跳过、可配置 `overwrite` / `uploadOverwrite` 覆盖替换；可用 `ssh.remoteWorkDir` 指定执行脚本的远端目录，
+  实现“上传到指定位置 -> 替换原有文件 -> 在该目录运行脚本”的部署流程；上传失败时该台不执行脚本（避免误跑旧文件）
 - 导出文件路径留空则不导出
 
 ## 构建
@@ -57,7 +60,11 @@ git push origin v1.0.0
 | `ssh.checkServices` / `ssh.services` | 登录成功后检查服务运行状态（如 sshd/docker），默认 true，services 留空默认查 sshd |
 | `ssh.script` / `ssh.scriptPath` | 登录成功后执行的脚本：script 内嵌内容 / scriptPath 本地文件路径（二选一）；通过 stdin 以 `bash -s` 执行，无需上传 |
 | `ssh.scriptTimeout` | 单台脚本执行超时，默认 60s，超时强制中断并标记失败 |
-| `output.csvPath` / `output.excelPath` | 留空则不导出；Excel 含「虚拟机清单」「服务器运行状态」「服务运行状态」「脚本执行结果」四个 Sheet |
+| `ssh.upload` | 登录成功后、执行脚本前上传的文件列表（本地 -> 远端绝对路径），支持 `mode` 权限、`overwrite` 单文件覆盖；同名已存在且未覆盖则跳过 |
+| `ssh.uploadOverwrite` | 全局默认是否覆盖同名文件，默认 false（安全，已存在则跳过）；true 则总是覆盖 |
+| `ssh.uploadMkdirs` | 远端父目录不存在时自动创建，未配置默认 true |
+| `ssh.remoteWorkDir` | 执行脚本前先 cd 到的远端目录（绝对路径），配合 upload 可实现在指定目录运行已上传脚本 |
+| `output.csvPath` / `output.excelPath` | 留空则不导出；Excel 含「虚拟机清单」「服务器运行状态」「服务运行状态」「脚本执行结果」「文件上传结果」五个 Sheet |
 | `output.scriptDir` | 脚本完整输出按机器落盘目录（留空不落盘）；保存为 `scriptDir/<运行时间戳>/<机器名>_<内网IP>.log` |
 | `raw.dir` | 接口原始返回数据保存目录，留空则不保存；保存为 `raw.dir/<运行时间戳>/<Action>[_<实例ID>][_p<页码>].json`，**可能含密码等敏感信息** |
 
@@ -94,6 +101,14 @@ git push origin v1.0.0
   失败/超时/会话中断时 stderr 自动回显该台状态、原因与输出尾部（最后 20 行）；单台输出上限 100KB，
   超出截断保留末尾并标注。屏幕「脚本执行」列显示摘要，Excel「脚本执行结果」Sheet 每台一行存完整输出，
   可配置 `output.scriptDir` 按机器落盘。以上状态均**不影响** SSH 登录结果标记。
+- 文件上传：配置 `ssh.upload` 后，SSH 登录成功即通过 SFTP（`github.com/pkg/sftp`，纯 Go）上传。
+  每条规则 `local -> remote`（remote 必须是远端绝对路径）；远端同名文件已存在时，默认**跳过**（安全，不误覆盖），
+  单条 `overwrite: true` 或全局 `uploadOverwrite: true` 才覆盖替换；`uploadMkdirs` 控制父目录自动创建（默认开）；
+  `mode` 设置远端权限（八进制，默认 0644）。上传发生在脚本执行之前；任一条上传失败时该台脚本**不执行**
+  （标记 `error`："上传失败，脚本未执行"），避免误跑远端旧文件。`remoteWorkDir` 配置后，脚本改为
+  `cd <目录> && bash -s` 执行（路径经单引号转义防注入）。屏幕「文件上传」列显示摘要（如 `✓ 2/2` / `✗ 1失败` / `✓ 1/2(跳过1)`），
+  Excel 新增「文件上传结果」Sheet 每台每文件一行（本地/远端/结果/是否覆盖/权限/错误信息）；
+  上传失败/跳过会在 stderr 回显现场。上传失败/跳过均**不影响** SSH 登录结果标记。
 - 调用接口：
   - `GetProjectList`（/project）按名称解析项目
   - `DescribeEcs`（/compute/ecs/instances）分页拉全量主机，客户端按 projectId 过滤（该接口无项目筛选参数）

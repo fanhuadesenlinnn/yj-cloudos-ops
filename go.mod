@@ -3,12 +3,14 @@ module github.com/fanhuadesenlinnn/yj-cloudos-ops
 go 1.26
 
 require (
+	github.com/pkg/sftp v1.13.11
 	github.com/xuri/excelize/v2 v2.11.0
 	golang.org/x/crypto v0.55.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
+	github.com/kr/fs v0.1.0 // indirect
 	github.com/richardlehane/mscfb v1.0.7 // indirect
 	github.com/richardlehane/msoleps v1.0.6 // indirect
 	github.com/tiendc/go-deepcopy v1.7.2 // indirect

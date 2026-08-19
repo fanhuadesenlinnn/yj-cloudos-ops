@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -20,7 +21,8 @@ import (
 
 // inProcOpts 测试服务器选项
 type inProcOpts struct {
-	AbortBashS bool // 对 "bash -s"（脚本执行）不返回退出码直接关会话，模拟 init 0/reboot 掐断
+	AbortBashS bool   // 对 "bash -s"（脚本执行）不返回退出码直接关会话，模拟 init 0/reboot 掐断
+	SFTPDir    string // 非空时支持 sftp subsystem，并以此目录为服务器工作目录（相对路径映射到此目录下）
 }
 
 func startInProcSSHServer(t *testing.T, password string) string {
@@ -108,6 +110,24 @@ func serveSession(channel ssh.Channel, requests <-chan *ssh.Request, opts inProc
 			// 否则客户端 Wait() 会一直等 stdout/stderr 拷贝协程结束
 			channel.CloseWrite()
 			return
+		case "subsystem":
+			var payload struct{ Name string }
+			if err := ssh.Unmarshal(req.Payload, &payload); err != nil {
+				req.Reply(false, nil)
+				continue
+			}
+			if payload.Name != "sftp" || opts.SFTPDir == "" {
+				req.Reply(false, nil)
+				continue
+			}
+			req.Reply(true, nil)
+			// 用 pkg/sftp 的服务器实现：相对路径映射到 SFTPDir 下，绝对路径原样传递（与真实 sshd 一致）
+			server, err := sftp.NewServer(channel, sftp.WithServerWorkingDirectory(opts.SFTPDir))
+			if err != nil {
+				return
+			}
+			server.Serve()
+			return
 		default:
 			req.Reply(false, nil) // 不支持 pty-req / shell 等
 		}
@@ -169,10 +189,11 @@ func TestScriptExecInProc(t *testing.T) {
 	cfg.SSH.Script = "echo hello-from-script; echo '含 中文 和 \"引号\" $符号'"
 	cfg.SSH.ScriptTimeout = "5s"
 
-	_, _, script, err := trySSH(cfg, "127.0.0.1", "Test@12345")
+	_, _, uploads, script, err := trySSH(cfg, "127.0.0.1", "Test@12345")
 	if err != nil {
 		t.Fatalf("trySSH 失败: %v", err)
 	}
+	_ = uploads
 	if script == nil || !script.OK || script.ExitCode != 0 || script.State != "success" {
 		t.Fatalf("脚本应成功: %+v", script)
 	}
@@ -192,7 +213,7 @@ func TestScriptExecNonZeroExitInProc(t *testing.T) {
 	cfg.SSH.Script = "echo before-fail; exit 42"
 	cfg.SSH.ScriptTimeout = "5s"
 
-	result, _, _, script := testOne(cfg, &VM{IP: "127.0.0.1", Password: "Test@12345"})
+	result, _, _, _, script := testOne(cfg, &VM{IP: "127.0.0.1", Password: "Test@12345"})
 	if !strings.HasPrefix(result, "✓") {
 		t.Errorf("登录结果不应受脚本失败影响: %q", result)
 	}
@@ -208,7 +229,7 @@ func TestScriptExecInterruptedInProc(t *testing.T) {
 	cfg.SSH.Script = "echo before-interrupt"
 	cfg.SSH.ScriptTimeout = "5s"
 
-	result, _, _, script := testOne(cfg, &VM{IP: "127.0.0.1", Password: "Test@12345"})
+	result, _, _, _, script := testOne(cfg, &VM{IP: "127.0.0.1", Password: "Test@12345"})
 	if !strings.HasPrefix(result, "✓") {
 		t.Errorf("登录结果不应受会话中断影响: %q", result)
 	}
@@ -231,7 +252,7 @@ func TestScriptExecTimeoutInProc(t *testing.T) {
 	cfg.SSH.ScriptTimeout = "1s"
 
 	start := time.Now()
-	result, _, _, script := testOne(cfg, &VM{IP: "127.0.0.1", Password: "Test@12345"})
+	result, _, _, _, script := testOne(cfg, &VM{IP: "127.0.0.1", Password: "Test@12345"})
 	if err := time.Since(start); err > 5*time.Second {
 		t.Errorf("超时未生效，耗时: %v", err)
 	}
@@ -253,7 +274,7 @@ func TestScriptNotRunOnAuthFailInProc(t *testing.T) {
 	cfg.SSH.Script = "echo never-runs"
 	cfg.SSH.ScriptTimeout = "5s"
 
-	result, _, script, err := trySSH(cfg, "127.0.0.1", "wrong-password")
+	result, _, _, script, err := trySSH(cfg, "127.0.0.1", "wrong-password")
 	if err == nil {
 		t.Fatalf("密码错误应登录失败")
 	}

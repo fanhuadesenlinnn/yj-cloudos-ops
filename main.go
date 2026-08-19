@@ -81,6 +81,16 @@ func main() {
 		}
 	}
 
+	// 配置了上传时提前检查本地文件存在性，缺失直接退出，避免每台机器重复报同一个错
+	if cfg.UploadEnabled() {
+		for _, f := range cfg.SSH.Upload {
+			if _, err := os.Stat(f.Local); err != nil {
+				fmt.Fprintf(os.Stderr, "上传文件不存在: %s: %v\n", f.Local, err)
+				os.Exit(1)
+			}
+		}
+	}
+
 	// 3. SSH 登录测试 + 服务器运行状态采集（并发，进度输出到 stderr）
 	runSSHTests(cfg, vms)
 

@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -15,6 +17,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -39,11 +42,15 @@ func runSSHTests(cfg *Config, vms []*VM) {
 		go func() {
 			defer wg.Done()
 			for vm := range jobs {
-				result, status, services, script := testOne(cfg, vm)
+				result, status, services, uploads, script := testOne(cfg, vm)
 				vm.SSHResult = result
 				vm.ServerStatus = status
 				vm.Services = services
+				vm.Uploads = uploads
 				vm.Script = script
+				if len(uploads) > 0 {
+					printUploadResults(vm, uploads) // 上传失败/跳过：stderr 回显现场
+				}
 				if script != nil {
 					if !script.OK && script.State != "error" {
 						printScriptFailure(vm, script) // 失败/超时/会话中断：stderr 回显现场
@@ -65,24 +72,24 @@ func runSSHTests(cfg *Config, vms []*VM) {
 	fmt.Fprintln(os.Stderr)
 }
 
-// testOne 对单台虚拟机做登录测试，成功且开启采集时返回服务器运行状态、服务状态与脚本执行结果
-func testOne(cfg *Config, vm *VM) (string, *ServerStatus, []ServiceStatus, *ScriptResult) {
+// testOne 对单台虚拟机做登录测试，成功且开启采集时返回服务器运行状态、服务状态、上传结果与脚本执行结果
+func testOne(cfg *Config, vm *VM) (string, *ServerStatus, []ServiceStatus, []*UploadResult, *ScriptResult) {
 	if vm.Password == "" {
-		return "无密码(GetEcsPassword未返回)", nil, nil, nil
+		return "无密码(GetEcsPassword未返回)", nil, nil, nil, nil
 	}
 	ips := candidateIPs(cfg, vm)
 	if len(ips) == 0 {
-		return "无可用IP", nil, nil, nil
+		return "无可用IP", nil, nil, nil, nil
 	}
 	var lastErr error
 	for _, ip := range ips {
-		status, services, script, err := trySSH(cfg, ip, vm.Password)
+		status, services, uploads, script, err := trySSH(cfg, ip, vm.Password)
 		if err == nil {
-			return "✓ 成功 (" + ip + ")", status, services, script
+			return "✓ 成功 (" + ip + ")", status, services, uploads, script
 		}
 		lastErr = err
 	}
-	return "✗ " + classifySSHErr(lastErr), nil, nil, nil
+	return "✗ " + classifySSHErr(lastErr), nil, nil, nil, nil
 }
 
 // candidateIPs 按配置选择测试用的 IP
@@ -110,8 +117,8 @@ func candidateIPs(cfg *Config, vm *VM) []string {
 	}
 }
 
-// trySSH 用 root+密码 连接，执行验证命令；开启采集时再执行脚本、状态采集与服务检查
-func trySSH(cfg *Config, ip, password string) (*ServerStatus, []ServiceStatus, *ScriptResult, error) {
+// trySSH 用 root+密码 连接，执行验证命令；成功后按需上传文件、执行脚本、采集状态与服务检查
+func trySSH(cfg *Config, ip, password string) (*ServerStatus, []ServiceStatus, []*UploadResult, *ScriptResult, error) {
 	addr := net.JoinHostPort(ip, strconv.Itoa(cfg.SSH.Port))
 	timeout := cfg.SSHSingleTimeout()
 
@@ -124,13 +131,13 @@ func trySSH(cfg *Config, ip, password string) (*ServerStatus, []ServiceStatus, *
 
 	conn, err := net.DialTimeout("tcp", addr, timeout)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	defer conn.Close()
 
 	sshConn, chans, reqs, err := ssh.NewClientConn(conn, addr, clientCfg)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	defer sshConn.Close()
 
@@ -139,19 +146,32 @@ func trySSH(cfg *Config, ip, password string) (*ServerStatus, []ServiceStatus, *
 
 	session, err := client.NewSession()
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	defer session.Close()
 
 	if _, err := session.Output(cfg.SSH.VerifyCommand); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
+	// 1. 上传文件（登录成功后、执行脚本前）
+	var uploads []*UploadResult
+	if cfg.UploadEnabled() {
+		uploads = uploadFiles(client, cfg)
+	}
+
+	// 2. 执行脚本
 	var script *ScriptResult
 	if cfg.ScriptEnabled() {
-		script = runScript(client, cfg)
+		if fail := firstUploadError(uploads); fail != nil {
+			// 上传失败时脚本不执行，避免误跑远端旧文件
+			script = &ScriptResult{ExitCode: -1, State: "error", Error: "上传失败，脚本未执行: " + fail.Error}
+		} else {
+			script = runScript(client, cfg)
+		}
 	}
 
+	// 3. 服务器运行状态 / 服务状态采集
 	var status *ServerStatus
 	if cfg.CheckStatusEnabled() {
 		status = collectServerStatus(client)
@@ -160,7 +180,131 @@ func trySSH(cfg *Config, ip, password string) (*ServerStatus, []ServiceStatus, *
 	if cfg.CheckServicesEnabled() {
 		services = collectServiceStatus(client, cfg.ServiceNames())
 	}
-	return status, services, script, nil
+	return status, services, uploads, script, nil
+}
+
+// ---------- 文件上传（SFTP） ----------
+
+// uploadFiles 通过 SFTP 把本地文件传到远端指定路径（可覆盖同名文件），返回每文件结果。
+// 纯 Go 实现（github.com/pkg/sftp），兼容 CGO_ENABLED=0 静态编译。
+func uploadFiles(client *ssh.Client, cfg *Config) []*UploadResult {
+	sftpClient, err := sftp.NewClient(client)
+	if err != nil {
+		return []*UploadResult{{State: "error", Error: "创建SFTP会话失败: " + err.Error()}}
+	}
+	defer sftpClient.Close()
+
+	results := make([]*UploadResult, 0, len(cfg.SSH.Upload))
+	for _, f := range cfg.SSH.Upload {
+		results = append(results, uploadOne(sftpClient, f, cfg))
+	}
+	return results
+}
+
+// uploadOne 上传单个文件：同名已存在且未开启覆盖 -> 跳过(skipped)；否则创建父目录、流式写入并设置权限。
+func uploadOne(sc *sftp.Client, f UploadFile, cfg *Config) *UploadResult {
+	res := &UploadResult{Local: f.Local, Remote: f.Remote}
+
+	mode, err := cfg.UploadFileMode(f)
+	if err != nil {
+		res.State = "error"
+		res.Error = err.Error()
+		return res
+	}
+	res.Mode = fmt.Sprintf("%04o", mode)
+
+	// 同名文件已存在且未开启覆盖：跳过（安全默认，避免误覆盖）
+	existed := false
+	if _, err := sc.Stat(f.Remote); err == nil {
+		existed = true
+	}
+	if existed && !cfg.UploadShouldOverwrite(f) {
+		res.State = "skipped"
+		res.Error = "远端已存在同名文件，未开启覆盖，已跳过"
+		return res
+	}
+
+	local, err := os.Open(f.Local)
+	if err != nil {
+		res.State = "error"
+		res.Error = "打开本地文件失败: " + err.Error()
+		return res
+	}
+	defer local.Close()
+
+	// 远端父目录不存在时自动创建
+	if cfg.UploadMkdirsEnabled() {
+		if dir := path.Dir(f.Remote); dir != "." && dir != "/" {
+			if err := sc.MkdirAll(dir); err != nil {
+				res.State = "error"
+				res.Error = "创建远端目录失败: " + err.Error()
+				return res
+			}
+		}
+	}
+
+	// O_TRUNC 覆盖写入（支持二进制/大文件，io.Copy 流式传输）
+	remote, err := sc.OpenFile(f.Remote, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
+	if err != nil {
+		res.State = "error"
+		res.Error = "打开远端文件失败: " + err.Error()
+		return res
+	}
+	if _, err := io.Copy(remote, local); err != nil {
+		remote.Close()
+		res.State = "error"
+		res.Error = "写入远端文件失败: " + err.Error()
+		return res
+	}
+	if err := remote.Close(); err != nil {
+		res.State = "error"
+		res.Error = "关闭远端文件失败: " + err.Error()
+		return res
+	}
+	if err := sc.Chmod(f.Remote, mode); err != nil {
+		res.State = "error"
+		res.Error = "设置远端权限失败: " + err.Error()
+		return res
+	}
+
+	res.Overwritten = existed
+	res.State = "success"
+	return res
+}
+
+// firstUploadError 返回上传结果中第一个 error 状态（无则返回 nil）
+func firstUploadError(uploads []*UploadResult) *UploadResult {
+	for _, u := range uploads {
+		if u != nil && u.State == "error" {
+			return u
+		}
+	}
+	return nil
+}
+
+// printUploadResults 上传失败/跳过时在 stderr 回显现场，便于当场定位
+func printUploadResults(vm *VM, uploads []*UploadResult) {
+	var lines []string
+	for _, u := range uploads {
+		if u == nil {
+			continue
+		}
+		switch u.State {
+		case "skipped":
+			lines = append(lines, fmt.Sprintf("  跳过: %s -> %s（%s）", u.Local, u.Remote, u.Error))
+		case "error":
+			lines = append(lines, fmt.Sprintf("  失败: %s -> %s（%s）", u.Local, u.Remote, u.Error))
+		}
+	}
+	if len(lines) == 0 {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "\n[上传] %s (%s)\n%s\n", vm.Name, vm.IP, strings.Join(lines, "\n"))
+}
+
+// shellQuote POSIX 单引号转义，把远端路径安全嵌入命令（防止路径含特殊字符注入）
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // runScript 通过 stdin 以 `bash -s` 在远端执行脚本（内容不经过 shell 拼接，无转义问题）。
@@ -196,7 +340,12 @@ func runScript(client *ssh.Client, cfg *Config) *ScriptResult {
 	session.Stderr = &errBuf
 
 	done := make(chan error, 1)
-	go func() { done <- session.Run("bash -s") }()
+	cmd := "bash -s"
+	if cfg.SSH.RemoteWorkDir != "" {
+		// 在指定目录下执行脚本（配合 upload 把脚本传到该目录后运行）
+		cmd = "cd " + shellQuote(cfg.SSH.RemoteWorkDir) + " && bash -s"
+	}
+	go func() { done <- session.Run(cmd) }()
 
 	select {
 	case err := <-done:

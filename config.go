@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -54,18 +56,30 @@ type PaginationCfg struct {
 }
 
 type SSHCfg struct {
-	Username      string   `yaml:"username"`      // 默认 root
-	Port          int      `yaml:"port"`          // 默认 22
-	Timeout       string   `yaml:"timeout"`       // 默认 10s
-	Workers       int      `yaml:"workers"`       // 并发数，默认 5
-	VerifyCommand string   `yaml:"verifyCommand"` // 登录成功后执行的验证命令，默认 "echo ok"
-	UseIP         string   `yaml:"useIp"`         // internal / eip / internal-then-eip，默认 internal
-	CheckStatus   *bool    `yaml:"checkStatus"`   // 登录成功后采集服务器运行状态（CPU/内存/磁盘/负载/OS），未配置默认 true
-	CheckServices *bool    `yaml:"checkServices"` // 登录成功后检查服务运行状态，未配置默认 true
-	Services      []string `yaml:"services"`      // 要检查的服务名列表；留空默认检查 sshd
-	Script        string   `yaml:"script"`        // 内嵌脚本内容（多行），与 scriptPath 二选一
-	ScriptPath    string   `yaml:"scriptPath"`    // 本地脚本文件路径，与 script 二选一
-	ScriptTimeout string   `yaml:"scriptTimeout"` // 单台脚本执行超时，默认 60s
+	Username        string       `yaml:"username"`        // 默认 root
+	Port            int          `yaml:"port"`            // 默认 22
+	Timeout         string       `yaml:"timeout"`         // 默认 10s
+	Workers         int          `yaml:"workers"`         // 并发数，默认 5
+	VerifyCommand   string       `yaml:"verifyCommand"`   // 登录成功后执行的验证命令，默认 "echo ok"
+	UseIP           string       `yaml:"useIp"`           // internal / eip / internal-then-eip，默认 internal
+	CheckStatus     *bool        `yaml:"checkStatus"`     // 登录成功后采集服务器运行状态（CPU/内存/磁盘/负载/OS），未配置默认 true
+	CheckServices   *bool        `yaml:"checkServices"`   // 登录成功后检查服务运行状态，未配置默认 true
+	Services        []string     `yaml:"services"`        // 要检查的服务名列表；留空默认检查 sshd
+	Script          string       `yaml:"script"`          // 内嵌脚本内容（多行），与 scriptPath 二选一
+	ScriptPath      string       `yaml:"scriptPath"`      // 本地脚本文件路径，与 script 二选一
+	ScriptTimeout   string       `yaml:"scriptTimeout"`   // 单台脚本执行超时，默认 60s
+	Upload          []UploadFile `yaml:"upload"`          // 登录成功后、执行脚本前上传的文件（本地 -> 远端指定位置）
+	UploadOverwrite bool         `yaml:"uploadOverwrite"` // 全局默认是否覆盖远端同名文件；false=已存在则跳过（安全默认），true=总是覆盖
+	UploadMkdirs    *bool        `yaml:"uploadMkdirs"`    // 远端父目录不存在时自动创建，未配置默认 true
+	RemoteWorkDir   string       `yaml:"remoteWorkDir"`   // 执行脚本前先 cd 到的远端目录（配合 upload 把脚本传到该目录后运行）
+}
+
+// UploadFile 一条上传规则：把本地文件传到远端指定路径（可覆盖同名文件）
+type UploadFile struct {
+	Local     string `yaml:"local"`     // 本地文件路径（相对当前目录或绝对路径）
+	Remote    string `yaml:"remote"`    // 远端绝对路径（“传到指定位置”）
+	Mode      string `yaml:"mode"`      // 远端文件权限，八进制字符串如 "0755" / "644"，默认 0644
+	Overwrite *bool  `yaml:"overwrite"` // 是否覆盖同名文件；缺省用 ssh.uploadOverwrite
 }
 
 type OutputCfg struct {
@@ -132,6 +146,26 @@ func loadConfig(path string) (*Config, error) {
 	if cfg.SSH.Script != "" && cfg.SSH.ScriptPath != "" {
 		return nil, fmt.Errorf("ssh.script 与 ssh.scriptPath 只能配置一个")
 	}
+	// 上传规则校验：本地/远端路径必填，远端必须是绝对路径（“传到指定位置”要明确），mode 必须可解析为八进制权限
+	for i, f := range cfg.SSH.Upload {
+		if f.Local == "" {
+			return nil, fmt.Errorf("ssh.upload[%d].local 不能为空", i)
+		}
+		if f.Remote == "" {
+			return nil, fmt.Errorf("ssh.upload[%d].remote 不能为空", i)
+		}
+		if !strings.HasPrefix(f.Remote, "/") {
+			return nil, fmt.Errorf("ssh.upload[%d].remote 必须是远端绝对路径（以 / 开头）: %s", i, f.Remote)
+		}
+		if f.Mode != "" {
+			if _, err := parseFileMode(f.Mode); err != nil {
+				return nil, fmt.Errorf("ssh.upload[%d].mode 非法: %w", i, err)
+			}
+		}
+	}
+	if cfg.SSH.RemoteWorkDir != "" && !strings.HasPrefix(cfg.SSH.RemoteWorkDir, "/") {
+		return nil, fmt.Errorf("ssh.remoteWorkDir 必须是远端绝对路径（以 / 开头）: %s", cfg.SSH.RemoteWorkDir)
+	}
 	return cfg, nil
 }
 
@@ -156,6 +190,41 @@ func (c *Config) ServiceNames() []string {
 // ScriptEnabled 是否配置了脚本执行（ssh.script / ssh.scriptPath）
 func (c *Config) ScriptEnabled() bool {
 	return c.SSH.Script != "" || c.SSH.ScriptPath != ""
+}
+
+// UploadEnabled 是否配置了文件上传（ssh.upload）
+func (c *Config) UploadEnabled() bool {
+	return len(c.SSH.Upload) > 0
+}
+
+// UploadMkdirsEnabled 远端父目录不存在时是否自动创建（未配置默认 true）
+func (c *Config) UploadMkdirsEnabled() bool {
+	return c.SSH.UploadMkdirs == nil || *c.SSH.UploadMkdirs
+}
+
+// UploadShouldOverwrite 单条上传规则是否覆盖同名文件：单文件 overwrite 优先，缺省用全局 uploadOverwrite
+func (c *Config) UploadShouldOverwrite(f UploadFile) bool {
+	if f.Overwrite != nil {
+		return *f.Overwrite
+	}
+	return c.SSH.UploadOverwrite
+}
+
+// UploadFileMode 解析单条上传规则的远端权限（默认 0644）
+func (c *Config) UploadFileMode(f UploadFile) (os.FileMode, error) {
+	if f.Mode == "" {
+		return 0o644, nil
+	}
+	return parseFileMode(f.Mode)
+}
+
+// parseFileMode 解析八进制权限字符串："0755" / "755" / "644" -> os.FileMode
+func parseFileMode(s string) (os.FileMode, error) {
+	v, err := strconv.ParseUint(strings.TrimPrefix(s, "0"), 8, 32)
+	if err != nil {
+		return 0, fmt.Errorf("八进制权限解析失败 %q（如 0755 / 644）: %w", s, err)
+	}
+	return os.FileMode(v), nil
 }
 
 // ScriptTimeoutDuration 单台脚本执行超时（默认 60s）

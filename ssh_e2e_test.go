@@ -21,10 +21,11 @@ func TestSSHE2E(t *testing.T) {
 	cfg.SSH.Script = "echo script-ok; hostname"
 	cfg.SSH.ScriptTimeout = "5s"
 
-	status, services, script, err := trySSH(cfg, "127.0.0.1", "Test@12345")
+	status, services, uploads, script, err := trySSH(cfg, "127.0.0.1", "Test@12345")
 	if err != nil {
 		t.Fatalf("trySSH 失败: %v", err)
 	}
+	_ = uploads
 	t.Logf("status: %+v", status)
 	if status == nil || status.Kernel == "" {
 		t.Errorf("运行状态未采集到")
@@ -60,7 +61,7 @@ func TestSSHE2EScriptFail(t *testing.T) {
 	cfg.SSH.Script = "echo before-fail; exit 7"
 	cfg.SSH.ScriptTimeout = "5s"
 
-	_, _, script, err := trySSH(cfg, "127.0.0.1", "Test@12345")
+	_, _, _, script, err := trySSH(cfg, "127.0.0.1", "Test@12345")
 	if err != nil {
 		t.Fatalf("trySSH 失败: %v", err)
 	}
@@ -82,7 +83,7 @@ func TestSSHE2EScriptTimeout(t *testing.T) {
 	cfg.SSH.Script = "sleep 30"
 	cfg.SSH.ScriptTimeout = "1s"
 
-	_, _, script, err := trySSH(cfg, "127.0.0.1", "Test@12345")
+	_, _, _, script, err := trySSH(cfg, "127.0.0.1", "Test@12345")
 	if err != nil {
 		t.Fatalf("trySSH 失败: %v", err)
 	}

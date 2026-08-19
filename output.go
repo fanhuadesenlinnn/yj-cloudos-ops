@@ -15,9 +15,9 @@ import (
 
 func outputTable(cfg *Config, vms []*VM) error {
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "序号\t名称\t类型\t内网IP\tEIP\tMAC\t规格\t系统盘\t数据盘\t项目\t密码\tSSH登录\t运行状态\t服务状态\t脚本执行")
+	fmt.Fprintln(w, "序号\t名称\t类型\t内网IP\tEIP\tMAC\t规格\t系统盘\t数据盘\t项目\t密码\tSSH登录\t运行状态\t服务状态\t文件上传\t脚本执行")
 	for i, vm := range vms {
-		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			i+1,
 			orDash(vm.Name),
 			orDash(vm.Type),
@@ -32,10 +32,61 @@ func outputTable(cfg *Config, vms []*VM) error {
 			vm.SSHResult,
 			statusStr(vm),
 			servicesStr(vm),
+			uploadStr(vm),
 			scriptStr(vm),
 		)
 	}
 	return w.Flush()
+}
+
+// uploadStr 文件上传摘要（屏幕/CSV/虚拟机清单展示）
+func uploadStr(vm *VM) string {
+	ups := vm.Uploads
+	if len(ups) == 0 {
+		return "—"
+	}
+	ok, skip, fail := 0, 0, 0
+	for _, u := range ups {
+		if u == nil {
+			continue
+		}
+		switch u.State {
+		case "success":
+			ok++
+		case "skipped":
+			skip++
+		default:
+			fail++
+		}
+	}
+	switch {
+	case fail > 0:
+		return fmt.Sprintf("✗ %d失败", fail)
+	case skip > 0:
+		return fmt.Sprintf("✓ %d/%d(跳过%d)", ok, len(ups), skip)
+	default:
+		return fmt.Sprintf("✓ %d/%d", ok, len(ups))
+	}
+}
+
+// uploadResultLabel 单条上传结果中文说明（Excel 明细用）
+func uploadResultLabel(u *UploadResult) string {
+	if u == nil {
+		return ""
+	}
+	switch u.State {
+	case "success":
+		if u.Overwritten {
+			return "已覆盖"
+		}
+		return "上传成功"
+	case "skipped":
+		return "跳过(已存在)"
+	case "error":
+		return "失败"
+	default:
+		return u.State
+	}
 }
 
 // scriptStr 脚本执行摘要（屏幕展示；按 State 分类，错误信息过长时截断）
@@ -292,7 +343,7 @@ func exportCSV(cfg *Config, vms []*VM) error {
 
 	header := []string{"序号", "虚拟机名称", "类型", "实例ID", "内网IP", "EIP", "MAC", "状态",
 		"规格编码", "规格描述", "CPU核数", "内存G", "系统盘大小G", "系统盘类型", "系统盘描述",
-		"数据盘", "项目名称", "项目ID", "root密码", "SSH登录结果", "服务状态", "脚本执行",
+		"数据盘", "项目名称", "项目ID", "root密码", "SSH登录结果", "服务状态", "文件上传", "脚本执行",
 		"操作系统", "内核版本", "运行时长", "负载(1/5/15)",
 		"CPU使用率%", "内存总量", "内存已用", "内存使用率%",
 		"根分区总量", "根分区已用", "根分区使用率%"}
@@ -322,6 +373,7 @@ func exportCSV(cfg *Config, vms []*VM) error {
 			vm.Password,
 			vm.SSHResult,
 			servicesStr(vm),
+			uploadStr(vm),
 			scriptStr(vm),
 		}
 		row = append(row, statusCSVFields(vm)...)
@@ -356,7 +408,7 @@ func exportExcel(cfg *Config, vms []*VM) error {
 
 	header := []string{"序号", "虚拟机名称", "类型", "实例ID", "内网IP", "EIP", "MAC", "状态",
 		"规格编码", "规格描述", "CPU核数", "内存G", "系统盘大小G", "系统盘类型", "系统盘描述",
-		"数据盘", "项目名称", "项目ID", "root密码", "SSH登录结果", "脚本执行"}
+		"数据盘", "项目名称", "项目ID", "root密码", "SSH登录结果", "文件上传", "脚本执行"}
 	style, _ := f.NewStyle(&excelize.Style{Font: &excelize.Font{Bold: true}})
 	writeHeader(f, sheet, header, style)
 
@@ -382,6 +434,7 @@ func exportExcel(cfg *Config, vms []*VM) error {
 			vm.ProjectID,
 			vm.Password,
 			vm.SSHResult,
+			uploadStr(vm),
 			scriptStr(vm),
 		}
 		for j, v := range row {
@@ -475,6 +528,44 @@ func exportExcel(cfg *Config, vms []*VM) error {
 		scrRow++
 	}
 	if err := f.AutoFilter(scrSheet, "A1:"+cellName(len(scrHeader), scrRow-1), nil); err != nil {
+		return err
+	}
+
+	// 文件上传结果表（每台虚拟机每个文件一行，含覆盖/跳过/失败明细）
+	upSheet := "文件上传结果"
+	f.NewSheet(upSheet)
+	upHeader := []string{"序号", "虚拟机名称", "内网IP", "项目名称", "SSH登录结果",
+		"本地路径", "远端路径", "结果", "是否覆盖", "权限", "错误信息"}
+	writeHeader(f, upSheet, upHeader, style)
+	upRow := 2
+	for i, vm := range vms {
+		if len(vm.Uploads) == 0 {
+			row := []any{i + 1, vm.Name, vm.IP, vm.ProjectName, vm.SSHResult, "", "", "", "", "", ""}
+			for j, v := range row {
+				cell, _ := excelize.CoordinatesToCellName(j+1, upRow)
+				f.SetCellValue(upSheet, cell, v)
+			}
+			upRow++
+			continue
+		}
+		for _, u := range vm.Uploads {
+			if u == nil {
+				continue
+			}
+			over := "否"
+			if u.Overwritten {
+				over = "是"
+			}
+			row := []any{i + 1, vm.Name, vm.IP, vm.ProjectName, vm.SSHResult,
+				u.Local, u.Remote, uploadResultLabel(u), over, u.Mode, u.Error}
+			for j, v := range row {
+				cell, _ := excelize.CoordinatesToCellName(j+1, upRow)
+				f.SetCellValue(upSheet, cell, v)
+			}
+			upRow++
+		}
+	}
+	if err := f.AutoFilter(upSheet, "A1:"+cellName(len(upHeader), upRow-1), nil); err != nil {
 		return err
 	}
 

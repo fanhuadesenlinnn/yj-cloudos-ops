@@ -57,6 +57,23 @@ ssh:
   # scriptPath: "scripts/check.sh"
   scriptTimeout: 60s   # 单台脚本执行超时，默认 60s，超时强制中断并标记失败
 
+  # 文件上传（可选）：SSH 登录成功后、执行脚本前，把本地文件传到远端指定位置。
+  # 每条规则一个本地文件 -> 远端绝对路径；同名文件已存在时默认跳过（安全），
+  # 设置 overwrite: true 或全局 uploadOverwrite: true 才会覆盖替换。
+  # 典型用法：先上传脚本到目标目录（可替换旧版），再用 remoteWorkDir + script 在该目录运行。
+  uploadOverwrite: false   # 全局默认是否覆盖同名文件；false=远端已存在则跳过，true=总是覆盖
+  uploadMkdirs: true       # 远端父目录不存在时自动创建，未配置默认 true
+  remoteWorkDir: ""        # 执行脚本前先 cd 到的远端目录（绝对路径），如 "/opt/myapp"
+  upload:
+    - local: "scripts/deploy.sh"      # 本地文件路径
+      remote: "/opt/myapp/deploy.sh" # 远端绝对路径（“传到指定位置”），父目录不存在会自动创建
+      mode: "0755"                    # 远端文件权限（八进制字符串），默认 0644；脚本类建议 0755
+      overwrite: true                  # 可选：覆盖同名文件；缺省用上面的 uploadOverwrite
+    # - local: "config/app.conf"
+    #   remote: "/etc/app/app.conf"   # 这个文件默认不覆盖，远端已有就跳过
+  # 注意：上传失败时该台机器的脚本不会执行（标记“未执行”，避免误跑远端旧文件），
+  #       但上传失败/跳过均不影响 SSH 登录结果标记；跳过与失败会在 stderr 回显。
+
 # 接口原始返回数据保存目录，留空则不保存
 # 目录结构: raw.dir/<运行时间戳>/<Action>[_p<页码>].json
 # 注意: 原始数据可能包含 root 密码等敏感信息，注意保管

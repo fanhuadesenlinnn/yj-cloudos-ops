@@ -280,6 +280,16 @@ type ScriptResult struct {
 	Truncated bool   // 输出是否因超过上限被截断
 }
 
+// UploadResult 文件上传结果（配置了 ssh.upload 时，登录成功后、执行脚本前上传）
+type UploadResult struct {
+	Local       string // 本地文件路径
+	Remote      string // 远端路径
+	State       string // success(成功) / skipped(已存在未覆盖) / error(失败)
+	Error       string // 失败原因 / 跳过原因
+	Overwritten bool   // 是否覆盖了远端已有同名文件
+	Mode        string // 实际设置的远端权限（八进制字符串，如 "0755"）
+}
+
 type VM struct {
 	ID           string
 	Name         string
@@ -303,6 +313,7 @@ type VM struct {
 	ProjectName  string
 	ServerStatus *ServerStatus   // SSH 登录成功后采集的服务器运行状态
 	Services     []ServiceStatus // SSH 登录成功后检查的服务运行状态
+	Uploads      []*UploadResult // SSH 登录成功后、脚本执行前上传的文件结果（未配置上传为 nil）
 	Script       *ScriptResult   // SSH 登录成功后执行的脚本结果（未配置脚本为 nil）
 	EniIDs       []string        // 裸金属网卡ID（用于反查 MAC）
 }
