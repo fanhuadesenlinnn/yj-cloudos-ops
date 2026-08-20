@@ -65,7 +65,7 @@ func TestProgressSinkCalledInRunSSHTests(t *testing.T) {
 		{Name: "h2", IP: "127.0.0.1", Password: "Test@12345"},
 		{Name: "h3", IP: "127.0.0.1", Password: "Test@12345"},
 	}
-	runSSHTests(cfg, vms, nil, false, prog, func(vm *VM) { vmLogs = append(vmLogs, vm.SSHResult) })
+	runSSHTests(cfg, vms, nil, false, prog, func(vm *VM) { vmLogs = append(vmLogs, vm.SSHResult) }, false)
 
 	if len(vmLogs) != 3 {
 		t.Errorf("onVM 应每台调用一次: %d", len(vmLogs))

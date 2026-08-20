@@ -265,7 +265,8 @@ func truncateWidth(s string, max int) string {
 // globalStopped 表示阶段一因某 once 步骤失败（onError=stop）已全局终止。
 // prog 非 nil 时使用传入的进度控制器（Web 模式带 sink 推送）；nil 时内部创建 CLI stderr 版。
 // onVM 非 nil 时每台主机执行完成（成功或失败）后调用，用于 Web 日志流。
-func runSSHTests(cfg *Config, vms []*VM, onceResults []*ExecStepResult, globalStopped bool, prog *progressMgr, onVM func(vm *VM)) {
+// checkOnly=true 时只测 SSH 连通性（验证命令），不执行 exec-list 流水线（检查模式，不产生副作用）。
+func runSSHTests(cfg *Config, vms []*VM, onceResults []*ExecStepResult, globalStopped bool, prog *progressMgr, onVM func(vm *VM), checkOnly bool) {
 	total := len(vms)
 	if total == 0 {
 		return
@@ -294,7 +295,7 @@ func runSSHTests(cfg *Config, vms []*VM, onceResults []*ExecStepResult, globalSt
 			defer wg.Done()
 			for vm := range jobs {
 				sshProgress.begin(vm) // 被 worker 领走（开始 SSH 连接）即算“开始”
-				result, status, services, steps := testOne(cfg, vm, onceResults, globalStopped)
+				result, status, services, steps := testOne(cfg, vm, onceResults, globalStopped, checkOnly)
 				vm.SSHResult = result
 				vm.ServerStatus = status
 				vm.Services = services
@@ -326,8 +327,9 @@ func runSSHTests(cfg *Config, vms []*VM, onceResults []*ExecStepResult, globalSt
 }
 
 // testOne 对单台虚拟机做登录测试，成功后按流水线（exec-list）依次执行各步骤。
+// checkOnly=true 时只测 SSH 连通性，不执行流水线（返回空步骤结果）。
 // 返回 SSH 登录结果、status/services 步骤采集的结构化数据与该台机器的步骤结果列表。
-func testOne(cfg *Config, vm *VM, onceResults []*ExecStepResult, globalStopped bool) (string, *ServerStatus, []ServiceStatus, []*ExecStepResult) {
+func testOne(cfg *Config, vm *VM, onceResults []*ExecStepResult, globalStopped bool, checkOnly bool) (string, *ServerStatus, []ServiceStatus, []*ExecStepResult) {
 	if vm.Password == "" {
 		return "无密码(GetEcsPassword未返回)", nil, nil, nil
 	}
@@ -337,7 +339,7 @@ func testOne(cfg *Config, vm *VM, onceResults []*ExecStepResult, globalStopped b
 	}
 	var lastErr error
 	for _, ip := range ips {
-		status, services, steps, err := trySSH(cfg, ip, vm.Password, onceResults, globalStopped)
+		status, services, steps, err := trySSH(cfg, ip, vm.Password, onceResults, globalStopped, checkOnly)
 		if err == nil {
 			return "✓ 成功 (" + ip + ")", status, services, steps
 		}
@@ -373,7 +375,7 @@ func candidateIPs(cfg *Config, vm *VM) []string {
 
 // trySSH 用 root+密码 连接并验证；成功后按流水线顺序执行各步骤（本地 once 步骤复用阶段一结果）。
 // 返回 status/services 步骤采集的结构化数据与该台机器的步骤结果列表。
-func trySSH(cfg *Config, ip, password string, onceResults []*ExecStepResult, globalStopped bool) (*ServerStatus, []ServiceStatus, []*ExecStepResult, error) {
+func trySSH(cfg *Config, ip, password string, onceResults []*ExecStepResult, globalStopped bool, checkOnly bool) (*ServerStatus, []ServiceStatus, []*ExecStepResult, error) {
 	addr := net.JoinHostPort(ip, strconv.Itoa(cfg.SSH.Port))
 	timeout := cfg.SSHSingleTimeout()
 
@@ -409,6 +411,10 @@ func trySSH(cfg *Config, ip, password string, onceResults []*ExecStepResult, glo
 		return nil, nil, nil, err
 	}
 
+	// 检查模式：只验证 SSH 连通性（verifyCommand 已执行成功），不跑 exec-list 流水线
+	if checkOnly {
+		return nil, nil, nil, nil
+	}
 	// 流水线执行
 	status, services, steps := runPipeline(cfg, client, ip, onceResults, globalStopped)
 	return status, services, steps, nil

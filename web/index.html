@@ -92,8 +92,10 @@ tr.clickable:hover td { background:#f7f9ff; }
             <label>项目</label>
             <select id="project-select"></select>
           </div>
-          <button class="pri" id="btn-run" onclick="startRun()">▶ 开始检查</button>
+          <button class="pri" id="btn-run" onclick="startRun()">▶ 开始运行</button>
+          <button class="pri" id="btn-check" onclick="startCheck()" style="background:#0ea5e9;border-color:#0ea5e9">🔍 开始检查</button>
           <button id="btn-export" class="hidden" onclick="exportExcel()">下载 Excel</button>
+          <span class="muted">检查 = 验证配置语法 + SSH 连通性（不执行流水线）；运行 = 按配置完整执行</span>
         </div>
         <div id="run-status" class="muted"></div>
       </div>
@@ -411,15 +413,28 @@ async function onProfileChange(){
 }
 function addOpt(sel, val, text){ const o=document.createElement('option'); o.value=val; o.textContent=text; sel.appendChild(o); }
 
+// 开始运行：按配置完整执行（拉主机 -> 流水线 -> 导出）
 function startRun(){
   const profile = $('profile-select').value;
   if (!profile){ toast('请先选择配置'); return; }
   const projectId = $('project-select').value || '';
   const btn = $('btn-run'); btn.disabled = true; btn.textContent = '运行中…';
   $('logs').textContent=''; $('result-table').innerHTML=''; $('btn-export').classList.add('hidden');
-  api('/api/run', {method:'POST', body: JSON.stringify({profile, projectId})})
+  api('/api/run', {method:'POST', body: JSON.stringify({profile, projectId, mode:'run'})})
     .then(job => { currentJob = job; connectSSE(job.id); })
-    .catch(e => { toast(e.message); btn.disabled=false; btn.textContent='▶ 开始检查'; });
+    .catch(e => { toast(e.message); btn.disabled=false; btn.textContent='▶ 开始运行'; });
+}
+
+// 开始检查：验证配置语法 + SSH 连通性，不执行流水线（无副作用）
+function startCheck(){
+  const profile = $('profile-select').value;
+  if (!profile){ toast('请先选择配置'); return; }
+  const projectId = $('project-select').value || '';
+  const btn = $('btn-check'); btn.disabled = true; btn.textContent = '检查中…';
+  $('logs').textContent=''; $('result-table').innerHTML=''; $('btn-export').classList.add('hidden');
+  api('/api/run', {method:'POST', body: JSON.stringify({profile, projectId, mode:'check'})})
+    .then(job => { currentJob = job; connectSSE(job.id); })
+    .catch(e => { toast(e.message); btn.disabled=false; btn.textContent='🔍 开始检查'; });
 }
 
 function connectSSE(jobId){
@@ -435,18 +450,37 @@ function appendLog(line){ const l=$('logs'); l.textContent += line+'\n'; l.scrol
 
 function onFinish(summary){
   if (es){ es.close(); es=null; }
-  const btn=$('btn-run'); btn.disabled=false; btn.textContent='▶ 开始检查';
+  const runBtn=$('btn-run'), chkBtn=$('btn-check');
+  runBtn.disabled=false; runBtn.textContent='▶ 开始运行';
+  chkBtn.disabled=false; chkBtn.textContent='🔍 开始检查';
   currentJob = summary;
-  $('run-status').textContent = summary.status==='failed' ? ('运行失败：'+summary.error) : ('运行完成（'+summary.finishedAt+'）');
-  if (summary.status==='failed'){ toast('运行失败：'+summary.error); return; }
+  if (summary.status==='failed'){
+    // 友好提示：区分“语法/配置错误”（改配置）与“执行失败”（可重试）
+    const err = summary.error||'';
+    if (err.indexOf('配置')>=0 || err.indexOf('项目')>=0 || err.indexOf('解析')>=0){
+      $('run-status').textContent = '检查/运行失败：'+err+'（请到「配置管理」修改配置后重试）';
+      toast('配置或项目解析错误，请修改配置后重试');
+    } else {
+      $('run-status').textContent = '运行失败：'+err;
+      toast('运行失败：'+err);
+    }
+    return;
+  }
+  const isCheck = summary.mode==='check';
+  $('run-status').textContent = isCheck ? '检查完成：'+ (summary.progress||'') : ('运行完成（'+summary.finishedAt+'）');
+  if (isCheck){
+    // 检查模式只展示 SSH 连通结果（不展示流水线步骤/不导出）
+    loadResult(summary.id, true);
+    return;
+  }
   loadResult(summary.id);
 }
-async function loadResult(jobId){
+async function loadResult(jobId, isCheck){
   try {
     const r = await api('/api/result?job='+jobId);
     resultVMs = r.vms || [];
-    $('result-meta').textContent = `共 ${resultVMs.length} 台`;
-    if (r.excelPath) $('btn-export').classList.remove('hidden');
+    $('result-meta').textContent = `共 ${resultVMs.length} 台` + (isCheck ? '（检查模式：仅 SSH 连通性）' : '');
+    if (!isCheck && r.excelPath) $('btn-export').classList.remove('hidden');
     renderTable(resultVMs);
   } catch(e){ toast(e.message); }
 }

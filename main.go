@@ -126,7 +126,7 @@ func main() {
 	}
 
 	// 3. SSH 登录测试 + 流水线步骤执行（并发，进度输出到 stderr）
-	runSSHTests(cfg, vms, onceResults, globalStopped, nil, nil)
+	runSSHTests(cfg, vms, onceResults, globalStopped, nil, nil, false)
 
 	// 4. 屏幕输出 + 可选导出（Excel，文件名自动生成: <配置名>_<时间戳>.xlsx）
 	if err := outputTable(cfg, vms); err != nil {

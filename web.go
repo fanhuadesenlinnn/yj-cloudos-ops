@@ -82,6 +82,7 @@ func (h *eventHub) publish(jobID, typ string, data any) {
 type Job struct {
 	ID         string    `json:"id"`
 	Profile    string    `json:"profile"`
+	Mode       string    `json:"mode"` // check（检查：语法+SSH连通，不执行流水线）/ run（完整执行）
 	Status     string    `json:"status"` // running / done / failed
 	Error      string    `json:"error"`
 	StartedAt  time.Time `json:"startedAt"`
@@ -102,7 +103,7 @@ func jobSummary(j *Job) map[string]any {
 		excel = filepath.Base(j.ExcelFile)
 	}
 	return map[string]any{
-		"id": j.ID, "profile": j.Profile, "status": j.Status, "error": j.Error,
+		"id": j.ID, "profile": j.Profile, "mode": j.Mode, "status": j.Status, "error": j.Error,
 		"startedAt": j.StartedAt, "finishedAt": j.FinishedAt,
 		"done": j.Done, "total": j.Total, "progress": j.Progress,
 		"excelFile": excel,
@@ -681,6 +682,7 @@ func (s *webServer) handleRun(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Profile   string `json:"profile"`
 		ProjectID string `json:"projectId"`
+		Mode      string `json:"mode"` // check / run（缺省 run）
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "请求格式错误", http.StatusBadRequest)
@@ -700,7 +702,11 @@ func (s *webServer) handleRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "已有任务运行中，请等待完成", http.StatusConflict)
 		return
 	}
-	job := &Job{ID: newSessionID(), Profile: req.Profile, Status: "running", StartedAt: time.Now(), Total: -1}
+	mode := req.Mode
+	if mode != "check" {
+		mode = "run"
+	}
+	job := &Job{ID: newSessionID(), Profile: req.Profile, Mode: mode, Status: "running", StartedAt: time.Now(), Total: -1}
 	s.currentJob = job
 	s.mu.Unlock()
 
@@ -756,9 +762,19 @@ func (s *webServer) runJob(job *Job) {
 		return
 	}
 	job.Total = len(vms)
-	s.hub.publish(job.ID, "log", map[string]any{"line": fmt.Sprintf("共 %d 台服务器", len(vms))})
+	checkOnly := job.Mode == "check"
+	if checkOnly {
+		s.hub.publish(job.ID, "log", map[string]any{"line": fmt.Sprintf("检查模式：仅验证配置与 SSH 连通性，不执行流水线（共 %d 台）", len(vms))})
+	} else {
+		s.hub.publish(job.ID, "log", map[string]any{"line": fmt.Sprintf("共 %d 台服务器", len(vms))})
+	}
 
-	onceResults, globalStopped := runPipelineOnce(cfg)
+	// 检查模式跳过本地 once 步骤（阶段一也属于执行链，不跑）
+	var onceResults []*ExecStepResult
+	var globalStopped bool
+	if !checkOnly {
+		onceResults, globalStopped = runPipelineOnce(cfg)
+	}
 	prog := newProgressMgr(len(vms), func(p *progressMgr) {
 		job.Done = p.done
 		job.Total = p.total
@@ -769,8 +785,26 @@ func (s *webServer) runJob(job *Job) {
 	})
 	runSSHTests(cfg, vms, onceResults, globalStopped, prog, func(vm *VM) {
 		s.hub.publish(job.ID, "log", map[string]any{"line": fmt.Sprintf("%s (%s) %s", vm.Name, vm.IP, vm.SSHResult)})
-	})
+	}, checkOnly)
 	job.VMs = vms
+
+	// 检查模式：统计 SSH 连通情况，友好提示（不执行流水线、不导出）
+	if checkOnly {
+		ok, fail := 0, 0
+		for _, vm := range vms {
+			if strings.HasPrefix(vm.SSHResult, "✓") {
+				ok++
+			} else {
+				fail++
+			}
+		}
+		job.Progress = fmt.Sprintf("检查完成：SSH 连通 %d/%d 台", ok, len(vms))
+		if fail > 0 {
+			job.Progress += fmt.Sprintf("，%d 台不可达/认证失败（详见结果）", fail)
+		}
+		s.hub.publish(job.ID, "log", map[string]any{"line": job.Progress})
+		return
+	}
 
 	// 导出 Excel（output.dir 配置了才导出，文件名自动生成）
 	if excelPath := autoExcelPath(job.Profile, cfg); excelPath != "" {

@@ -192,7 +192,7 @@ func TestScriptExecInProc(t *testing.T) {
 	cfg := inProcSSHCfg(addr)
 	cfg.ExecList = []ExecStep{commandStep("remote", "echo hello-from-script; echo '含 中文 和 \"引号\" $符号'")}
 
-	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
+	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false, false)
 	if err != nil {
 		t.Fatalf("trySSH 失败: %v", err)
 	}
@@ -229,7 +229,7 @@ func TestScriptPathCRLFInProc(t *testing.T) {
 	}
 	cfg.ExecList = []ExecStep{{Name: "CRLF脚本", Type: "command", Target: "remote", ScriptPath: path, Timeout: "5s"}}
 
-	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
+	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false, false)
 	if err != nil {
 		t.Fatalf("trySSH 失败: %v", err)
 	}
@@ -248,7 +248,7 @@ func TestScriptExecNonZeroExitInProc(t *testing.T) {
 	cfg := inProcSSHCfg(addr)
 	cfg.ExecList = []ExecStep{commandStep("remote", "echo before-fail; exit 42")}
 
-	result, _, _, steps := testOne(cfg, &VM{IP: "127.0.0.1", Password: "Test@12345"}, nil, false)
+	result, _, _, steps := testOne(cfg, &VM{IP: "127.0.0.1", Password: "Test@12345"}, nil, false, false)
 	if !strings.HasPrefix(result, "✓") {
 		t.Errorf("登录结果不应受脚本失败影响: %q", result)
 	}
@@ -264,7 +264,7 @@ func TestScriptExecInterruptedInProc(t *testing.T) {
 	cfg := inProcSSHCfg(addr)
 	cfg.ExecList = []ExecStep{commandStep("remote", "echo before-interrupt")}
 
-	result, _, _, steps := testOne(cfg, &VM{IP: "127.0.0.1", Password: "Test@12345"}, nil, false)
+	result, _, _, steps := testOne(cfg, &VM{IP: "127.0.0.1", Password: "Test@12345"}, nil, false, false)
 	if !strings.HasPrefix(result, "✓") {
 		t.Errorf("登录结果不应受会话中断影响: %q", result)
 	}
@@ -289,7 +289,7 @@ func TestScriptExecTimeoutInProc(t *testing.T) {
 	cfg.ExecList = []ExecStep{step}
 
 	start := time.Now()
-	result, _, _, steps := testOne(cfg, &VM{IP: "127.0.0.1", Password: "Test@12345"}, nil, false)
+	result, _, _, steps := testOne(cfg, &VM{IP: "127.0.0.1", Password: "Test@12345"}, nil, false, false)
 	if err := time.Since(start); err > 5*time.Second {
 		t.Errorf("超时未生效，耗时: %v", err)
 	}
@@ -311,7 +311,7 @@ func TestScriptNotRunOnAuthFailInProc(t *testing.T) {
 	cfg := inProcSSHCfg(addr)
 	cfg.ExecList = []ExecStep{commandStep("remote", "echo never-runs")}
 
-	_, _, steps, err := trySSH(cfg, "127.0.0.1", "wrong-password", nil, false)
+	_, _, steps, err := trySSH(cfg, "127.0.0.1", "wrong-password", nil, false, false)
 	if err == nil {
 		t.Fatalf("密码错误应登录失败")
 	}
@@ -329,7 +329,7 @@ func TestPipelineStopOnErrorInProc(t *testing.T) {
 		commandStep("remote", "echo should-not-run"),
 	}
 
-	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
+	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false, false)
 	if err != nil {
 		t.Fatalf("trySSH 失败: %v", err)
 	}
@@ -350,7 +350,7 @@ func TestPipelineContinueOnErrorInProc(t *testing.T) {
 		commandStep("remote", "echo still-runs"),
 	}
 
-	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
+	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false, false)
 	if err != nil {
 		t.Fatalf("trySSH 失败: %v", err)
 	}
@@ -382,7 +382,7 @@ func TestPipelineLocalOnceInProc(t *testing.T) {
 		t.Errorf("本地步骤输出缺失: %q", onceResults[0].Output)
 	}
 
-	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", onceResults, false)
+	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", onceResults, false, false)
 	if err != nil {
 		t.Fatalf("trySSH 失败: %v", err)
 	}
@@ -414,7 +414,7 @@ func TestPipelineLocalOnceFailStopsGlobal(t *testing.T) {
 		t.Errorf("本地步骤应失败: %+v", onceResults[0])
 	}
 
-	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", onceResults, true)
+	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", onceResults, true, false)
 	if err != nil {
 		t.Fatalf("trySSH 失败: %v", err)
 	}
@@ -432,7 +432,7 @@ func TestEmptyExecListInProc(t *testing.T) {
 	cfg := inProcSSHCfg(addr)
 	cfg.ExecList = []ExecStep{} // 显式空流水线
 
-	result, _, _, steps := testOne(cfg, &VM{IP: "127.0.0.1", Password: "Test@12345"}, nil, false)
+	result, _, _, steps := testOne(cfg, &VM{IP: "127.0.0.1", Password: "Test@12345"}, nil, false, false)
 	if !strings.HasPrefix(result, "✓") {
 		t.Errorf("登录应成功: %q", result)
 	}
@@ -446,7 +446,7 @@ func TestDefaultPipelineInProc(t *testing.T) {
 	addr := startInProcSSHServer(t, "Test@12345")
 	cfg := inProcSSHCfg(addr) // 不配置 ExecList
 
-	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
+	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false, false)
 	if err != nil {
 		t.Fatalf("trySSH 失败: %v", err)
 	}

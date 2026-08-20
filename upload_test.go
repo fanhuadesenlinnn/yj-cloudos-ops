@@ -175,7 +175,7 @@ func TestUploadInProc(t *testing.T) {
 	cfg.ExecList[1].Script = "bash deploy.sh"
 	cfg.ExecList[1].Workdir = filepath.Join(remoteRoot, "opt/myapp")
 
-	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
+	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false, false)
 	if err != nil {
 		t.Fatalf("trySSH 失败: %v", err)
 	}
@@ -232,7 +232,7 @@ func TestUploadOverwriteInProc(t *testing.T) {
 
 	// 1. 默认不覆盖：跳过，远端内容保持旧值
 	cfg.ExecList[0].Files = []StepUploadFile{{Local: local, Remote: remoteFile}}
-	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
+	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false, false)
 	if err != nil {
 		t.Fatalf("trySSH 失败: %v", err)
 	}
@@ -246,7 +246,7 @@ func TestUploadOverwriteInProc(t *testing.T) {
 
 	// 2. 单文件 overwrite=true：覆盖，内容替换为新值
 	cfg.ExecList[0].Files = []StepUploadFile{{Local: local, Remote: remoteFile, Overwrite: boolPtr(true)}}
-	_, _, steps, err = trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
+	_, _, steps, err = trySSH(cfg, "127.0.0.1", "Test@12345", nil, false, false)
 	if err != nil {
 		t.Fatalf("trySSH 失败: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestUploadOverwriteInProc(t *testing.T) {
 	os.WriteFile(remoteFile, []byte("OLD-AGAIN\n"), 0o644)
 	cfg.ExecList[0].Overwrite = boolPtr(true)
 	cfg.ExecList[0].Files = []StepUploadFile{{Local: local, Remote: remoteFile}}
-	_, _, steps, err = trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
+	_, _, steps, err = trySSH(cfg, "127.0.0.1", "Test@12345", nil, false, false)
 	if err != nil {
 		t.Fatalf("trySSH 失败: %v", err)
 	}
@@ -280,7 +280,7 @@ func TestUploadFailBlocksScriptInProc(t *testing.T) {
 	cfg.ExecList[0].Files = []StepUploadFile{{Local: filepath.Join(t.TempDir(), "not-exist.sh"), Remote: filepath.Join(remoteRoot, "opt/x.sh")}}
 	cfg.ExecList[1].Script = "echo should-not-run"
 
-	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
+	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false, false)
 	if err != nil {
 		t.Fatalf("trySSH 失败: %v", err)
 	}
@@ -301,7 +301,7 @@ func TestUploadFailContinueInProc(t *testing.T) {
 	cfg.ExecList[0].Files = []StepUploadFile{{Local: filepath.Join(t.TempDir(), "not-exist.sh"), Remote: filepath.Join(remoteRoot, "opt/x.sh")}}
 	cfg.ExecList[1].Script = "echo still-run"
 
-	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
+	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false, false)
 	if err != nil {
 		t.Fatalf("trySSH 失败: %v", err)
 	}
@@ -326,7 +326,7 @@ func TestUploadWithoutScriptInProc(t *testing.T) {
 		}(), Remote: filepath.Join(remoteRoot, "etc/app.conf")}}},
 	}
 
-	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
+	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false, false)
 	if err != nil {
 		t.Fatalf("trySSH 失败: %v", err)
 	}
@@ -360,7 +360,7 @@ func TestUploadFolderInProc(t *testing.T) {
 		}},
 	}
 
-	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
+	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false, false)
 	if err != nil {
 		t.Fatalf("trySSH 失败: %v", err)
 	}
@@ -411,7 +411,7 @@ func TestPullInProc(t *testing.T) {
 		}},
 	}
 
-	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
+	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false, false)
 	if err != nil {
 		t.Fatalf("trySSH 失败: %v", err)
 	}
@@ -453,7 +453,7 @@ func TestPullFolderInProc(t *testing.T) {
 		}},
 	}
 
-	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
+	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false, false)
 	if err != nil {
 		t.Fatalf("trySSH 失败: %v", err)
 	}
@@ -493,7 +493,7 @@ func TestPullOverwriteInProc(t *testing.T) {
 			{Local: localFile, Remote: remoteFile},
 		}},
 	}
-	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
+	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false, false)
 	if err != nil {
 		t.Fatalf("trySSH 失败: %v", err)
 	}
@@ -507,7 +507,7 @@ func TestPullOverwriteInProc(t *testing.T) {
 
 	// 2. overwrite=true：覆盖
 	cfg.ExecList[0].Files = []StepUploadFile{{Local: localFile, Remote: remoteFile, Overwrite: boolPtr(true)}}
-	_, _, steps, err = trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
+	_, _, steps, err = trySSH(cfg, "127.0.0.1", "Test@12345", nil, false, false)
 	if err != nil {
 		t.Fatalf("trySSH 失败: %v", err)
 	}

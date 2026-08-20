@@ -23,7 +23,7 @@ func TestSSHE2E(t *testing.T) {
 		{Name: "命令", Type: "command", Target: "remote", Script: "echo script-ok; hostname", Timeout: "5s"},
 	}
 
-	status, services, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
+	status, services, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false, false)
 	if err != nil {
 		t.Fatalf("trySSH 失败: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestSSHE2EScriptFail(t *testing.T) {
 		{Name: "命令", Type: "command", Target: "remote", Script: "echo before-fail; exit 7", Timeout: "5s"},
 	}
 
-	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
+	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false, false)
 	if err != nil {
 		t.Fatalf("trySSH 失败: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestSSHE2EScriptTimeout(t *testing.T) {
 		{Name: "命令", Type: "command", Target: "remote", Script: "sleep 30", Timeout: "1s"},
 	}
 
-	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
+	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false, false)
 	if err != nil {
 		t.Fatalf("trySSH 失败: %v", err)
 	}
