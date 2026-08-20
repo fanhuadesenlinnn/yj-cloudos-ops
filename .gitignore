@@ -14,3 +14,7 @@ config.yaml
 
 # 根目录 go build 直接产物
 /yj-cloudos-ops
+
+# Web 文件目录 / 设置（运行时生成）
+files/
+settings.yaml

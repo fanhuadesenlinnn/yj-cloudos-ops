@@ -14,6 +14,7 @@ import (
 type Settings struct {
 	Auth        AuthCfg `yaml:"auth"`        // 登录账号
 	ConfigsDir  string  `yaml:"configsDir"`  // 多配置文件目录（默认 ./configs）
+	FilesDir    string  `yaml:"filesDir"`    // 文件管理目录（默认 ./files，Web 上传的文件放这里，配置里 local 引用 files/xxx）
 	HistorySize int     `yaml:"historySize"` // 运行历史保留条数（默认 10，重启即清空）
 }
 
@@ -24,11 +25,12 @@ type AuthCfg struct {
 	Salt         string `yaml:"salt"`
 }
 
-// defaultSettings 首次启动的默认设置：admin/admin + 默认配置目录
+// defaultSettings 首次启动的默认设置：admin/admin + 默认配置目录/文件目录
 func defaultSettings() *Settings {
 	return &Settings{
 		Auth:        AuthCfg{Username: "admin"},
 		ConfigsDir:  "configs",
+		FilesDir:    "files",
 		HistorySize: 10,
 	}
 }
@@ -40,6 +42,9 @@ func (s *Settings) applyDefaults() {
 	}
 	if s.ConfigsDir == "" {
 		s.ConfigsDir = "configs"
+	}
+	if s.FilesDir == "" {
+		s.FilesDir = "files"
 	}
 	if s.HistorySize <= 0 {
 		s.HistorySize = 10

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -136,9 +137,13 @@ func runWeb(addr, configsDir, settingsPath string) {
 			os.Exit(1)
 		}
 	}
-	// 配置目录不存在则创建
+	// 配置目录 / 文件目录不存在则创建
 	if err := os.MkdirAll(st.ConfigsDir, 0o755); err != nil {
 		fmt.Fprintf(os.Stderr, "创建配置目录 %s 失败: %v\n", st.ConfigsDir, err)
+		os.Exit(1)
+	}
+	if err := os.MkdirAll(st.FilesDir, 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "创建文件目录 %s 失败: %v\n", st.FilesDir, err)
 		os.Exit(1)
 	}
 	// Web 模式：同名多项目不再 stdin 交互，按预选 ID 匹配或报错提示页面选择
@@ -167,6 +172,7 @@ func runWeb(addr, configsDir, settingsPath string) {
 	fmt.Fprintf(os.Stderr, "  监听地址: http://%s\n", addr)
 	fmt.Fprintf(os.Stderr, "  设置文件: %s\n", settingsPath)
 	fmt.Fprintf(os.Stderr, "  配置目录: %s\n", st.ConfigsDir)
+	fmt.Fprintf(os.Stderr, "  文件目录: %s\n", st.FilesDir)
 	fmt.Fprintf(os.Stderr, "  登录账号: %s / admin（默认，请尽快修改）\n", st.Auth.Username)
 	if err := http.ListenAndServe(addr, handler); err != nil {
 		fmt.Fprintf(os.Stderr, "HTTP 服务启动失败: %v\n", err)
@@ -189,6 +195,8 @@ func (s *webServer) routes() http.Handler {
 	mux.HandleFunc("/api/history", s.auth(s.handleHistory))
 	mux.HandleFunc("/api/result", s.auth(s.handleResult))
 	mux.HandleFunc("/api/export", s.auth(s.handleExport))
+	mux.HandleFunc("/api/files", s.auth(s.handleFiles))
+	mux.HandleFunc("/api/files/", s.auth(s.handleFileItem))
 	return mux
 }
 
@@ -269,6 +277,7 @@ func (s *webServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, map[string]any{
 			"username":    s.settings.Auth.Username,
 			"configsDir":  s.settings.ConfigsDir,
+			"filesDir":    s.settings.FilesDir,
 			"historySize": s.settings.HistorySize,
 			"defaultPassword": s.settings.Auth.Username == "admin",
 		})
@@ -277,6 +286,7 @@ func (s *webServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 			Username    string `json:"username"`
 			Password    string `json:"password"`
 			ConfigsDir  string `json:"configsDir"`
+			FilesDir    string `json:"filesDir"`
 			HistorySize int    `json:"historySize"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -299,6 +309,13 @@ func (s *webServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			s.settings.ConfigsDir = req.ConfigsDir
+		}
+		if req.FilesDir != "" {
+			if err := os.MkdirAll(req.FilesDir, 0o755); err != nil {
+				http.Error(w, "文件目录创建失败: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			s.settings.FilesDir = req.FilesDir
 		}
 		if req.HistorySize > 0 {
 			s.settings.HistorySize = req.HistorySize
@@ -749,6 +766,114 @@ func (s *webServer) handleExport(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Disposition", `attachment; filename="`+filepath.Base(job.ExcelFile)+`"`)
 	http.ServeFile(w, r, job.ExcelFile)
+}
+
+// ---------- 文件管理 API ----------
+
+// maxUploadSize 上传文件大小上限
+const maxUploadSize = 2 << 30 // 2GB
+
+// handleFiles 文件列表 / 上传
+func (s *webServer) handleFiles(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		entries, err := os.ReadDir(s.settings.FilesDir)
+		if err != nil {
+			http.Error(w, "读取文件目录失败: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		files := []map[string]any{}
+		for _, e := range entries {
+			if e.IsDir() {
+				continue // 只管理文件，子目录不展示（避免意外删目录）
+			}
+			info, err := e.Info()
+			if err != nil {
+				continue
+			}
+			files = append(files, map[string]any{
+				"name":    e.Name(),
+				"size":    info.Size(),
+				"modTime": info.ModTime(),
+				"ref":     filepath.Join("files", e.Name()), // 配置里 local 的引用路径
+			})
+		}
+		jsonResponse(w, files)
+	case http.MethodPost:
+		// 上传：multipart/form-data，字段 file（可多个）
+		r.Body = http.MaxBytesReader(w, r.Body, maxUploadSize)
+		if err := r.ParseMultipartForm(maxUploadSize); err != nil {
+			http.Error(w, "上传失败（文件过大或格式错误）: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := os.MkdirAll(s.settings.FilesDir, 0o755); err != nil {
+			http.Error(w, "创建文件目录失败: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		uploaded := []string{}
+		for _, fh := range r.MultipartForm.File["file"] {
+			// 防路径穿越：拒绝带路径分隔符的文件名（不静默净化，避免用户困惑）
+			if strings.ContainsAny(fh.Filename, "/\\") || fh.Filename == "." || fh.Filename == ".." {
+				http.Error(w, "非法文件名（不能包含路径）: "+fh.Filename, http.StatusBadRequest)
+				return
+			}
+			name := fh.Filename
+			in, err := fh.Open()
+			if err != nil {
+				http.Error(w, "读取上传文件失败: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			out, err := os.Create(filepath.Join(s.settings.FilesDir, name))
+			if err != nil {
+				in.Close()
+				http.Error(w, "保存文件失败: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			_, err = io.Copy(out, in)
+			in.Close()
+			out.Close()
+			if err != nil {
+				http.Error(w, "写入文件失败: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			uploaded = append(uploaded, name)
+		}
+		if len(uploaded) == 0 {
+			http.Error(w, "未收到文件（字段名 file）", http.StatusBadRequest)
+			return
+		}
+		jsonResponse(w, map[string]any{"ok": true, "uploaded": uploaded})
+	default:
+		http.Error(w, "不支持的方法", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleFileItem 单个文件：下载 / 删除
+func (s *webServer) handleFileItem(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(r.URL.Path, "/api/files/")
+	name = filepath.Base(name) // 防路径穿越
+	if name == "." || name == ".." || strings.Contains(name, "/") || strings.Contains(name, "\\") {
+		http.Error(w, "非法文件名", http.StatusBadRequest)
+		return
+	}
+	path := filepath.Join(s.settings.FilesDir, name)
+	if !fileExists(path) {
+		http.Error(w, "文件不存在", http.StatusNotFound)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
+		http.ServeFile(w, r, path)
+	case http.MethodDelete:
+		if err := os.Remove(path); err != nil {
+			http.Error(w, "删除失败: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		jsonResponse(w, map[string]any{"ok": true})
+	default:
+		http.Error(w, "不支持的方法", http.StatusMethodNotAllowed)
+	}
 }
 
 // ---------- 工具 ----------

@@ -73,6 +73,7 @@ tr.clickable:hover td { background:#f7f9ff; }
       <div class="tabs">
         <div class="tab active" data-tab="run" onclick="switchTab('run')">运行</div>
         <div class="tab" data-tab="configs" onclick="switchTab('configs')">配置管理</div>
+        <div class="tab" data-tab="files" onclick="switchTab('files')">文件</div>
         <div class="tab" data-tab="settings" onclick="switchTab('settings')">设置</div>
         <div class="tab" data-tab="help" onclick="switchTab('help')">帮助</div>
         <div class="tab" onclick="logout()">退出</div>
@@ -129,6 +130,18 @@ tr.clickable:hover td { background:#f7f9ff; }
       </div>
     </div>
 
+    <!-- 文件管理 -->
+    <div id="tab-files" class="hidden">
+      <div class="card">
+        <h3>文件管理 <span class="muted">上传的文件放在 <code id="files-dir"></code>，配置里 <code>files</code> 模块的 <code>local</code> 引用 <code>files/文件名</code> 即可推送到服务器</span></h3>
+        <div class="row">
+          <input type="file" id="file-input" multiple>
+          <button class="pri" onclick="uploadFiles()">上传</button>
+        </div>
+        <div style="overflow:auto"><table id="files-table"></table></div>
+      </div>
+    </div>
+
     <!-- 设置 -->
     <div id="tab-settings" class="hidden">
       <div class="card">
@@ -140,6 +153,7 @@ tr.clickable:hover td { background:#f7f9ff; }
       <div class="card">
         <h3>运行设置</h3>
         <div class="row"><label style="width:80px">配置目录</label><input id="set-dir" style="width:300px" placeholder="如：configs"></div>
+        <div class="row"><label style="width:80px">文件目录</label><input id="set-filesdir" style="width:300px" placeholder="如：files"></div>
         <div class="row"><label style="width:80px">历史保留</label><input id="set-history" type="number" min="1" max="100" style="width:80px"><span class="muted">条（重启即清空）</span></div>
         <button class="pri" onclick="saveSettings()">保存设置</button>
       </div>
@@ -191,16 +205,63 @@ async function enterMain(){
 // ---------- 设置 ----------
 async function loadSettingsForm(){
   const s = await api('/api/settings');
-  $('set-user').value = s.username; $('set-dir').value = s.configsDir; $('set-history').value = s.historySize;
+  $('set-user').value = s.username; $('set-dir').value = s.configsDir;
+  $('set-filesdir').value = s.filesDir; $('set-history').value = s.historySize;
+  $('files-dir').textContent = s.filesDir;
 }
 async function saveSettings(){
   try {
     await api('/api/settings', {method:'POST', body: JSON.stringify({
       username:$('set-user').value, password:$('set-pass').value,
-      configsDir:$('set-dir').value, historySize:parseInt($('set-history').value)||10})});
+      configsDir:$('set-dir').value, filesDir:$('set-filesdir').value,
+      historySize:parseInt($('set-history').value)||10})});
     toast('设置已保存'); $('set-pass').value='';
-    await loadConfigs();
+    await loadConfigs(); await loadFiles();
   } catch(e){ toast(e.message); }
+}
+
+// ---------- 文件管理 ----------
+async function loadFiles(){
+  try {
+    const list = await api('/api/files');
+    const tb = $('files-table');
+    tb.innerHTML = '<tr><th>文件名</th><th>大小</th><th>修改时间</th><th>引用路径</th><th>操作</th></tr>' +
+      (list.length ? list.map(f=>`<tr>
+        <td>${esc(f.name)}</td><td>${fmtSize(f.size)}</td><td>${fmtTime(f.modTime)}</td>
+        <td><code>${esc(f.ref)}</code> <button onclick="copyRef('${escAttr(f.name)}')">复制</button></td>
+        <td><button onclick="downloadFile('${escAttr(f.name)}')">下载</button>
+            <button class="danger" onclick="delFile('${escAttr(f.name)}')">删除</button></td>
+      </tr>`).join('') : '<tr><td colspan="5" class="muted">还没有文件，选择文件后点击「上传」</td></tr>');
+  } catch(e){ toast(e.message); }
+}
+async function uploadFiles(){
+  const input = $('file-input');
+  if (!input.files.length){ toast('请先选择文件'); return; }
+  const fd = new FormData();
+  for (const f of input.files) fd.append('file', f);
+  try {
+    const r = await fetch('/api/files', {method:'POST', body: fd, headers:{}});
+    if (r.status===401){ showLogin(); throw new Error('未登录'); }
+    if (!r.ok){ throw new Error(await r.text()); }
+    toast('已上传 '+r.uploaded.length+' 个文件');
+    input.value=''; await loadFiles();
+  } catch(e){ toast('上传失败: '+e.message); }
+}
+async function downloadFile(name){ window.location = '/api/files/'+encodeURIComponent(name); }
+async function delFile(name){
+  if (!confirm('确定删除文件「'+name+'」？')) return;
+  try { await api('/api/files/'+encodeURIComponent(name), {method:'DELETE'}); toast('已删除'); await loadFiles(); }
+  catch(e){ toast(e.message); }
+}
+async function copyRef(name){
+  try { await navigator.clipboard.writeText('files/'+name); toast('已复制引用路径: files/'+name); }
+  catch(e){ toast('复制失败: '+e.message); }
+}
+function fmtSize(n){
+  if (n<1024) return n+' B';
+  if (n<1048576) return (n/1024).toFixed(1)+' KB';
+  if (n<1073741824) return (n/1048576).toFixed(1)+' MB';
+  return (n/1073741824).toFixed(2)+' GB';
 }
 
 // ---------- 配置管理 ----------
@@ -352,8 +413,9 @@ function exportExcel(){
 // ---------- 帮助 ----------
 function switchTab(name){
   document.querySelectorAll('.tab[data-tab]').forEach(t=>t.classList.toggle('active', t.dataset.tab===name));
-  ['run','configs','settings','help'].forEach(t=>$('tab-'+t).classList.toggle('hidden', t!==name));
+  ['run','configs','files','settings','help'].forEach(t=>$('tab-'+t).classList.toggle('hidden', t!==name));
   if (name==='configs') loadConfigs();
+  if (name==='files') loadFiles();
   if (name==='settings') loadSettingsForm();
   if (name==='help') renderHelp();
 }
@@ -449,6 +511,7 @@ const HELP_MD = `# 配置说明
 | \`project.name/names\` | 项目名称，支持多个；\`*\`/\`all\` 检查全部项目 |
 | \`filter\` | IP 筛选：includeIPs 圈定 + excludeIPs 剔除，支持精确IP/CIDR/通配符 |
 | \`output.dir\` | 导出目录，留空不导出；文件名自动生成 \`<配置名>_<时间戳>.xlsx\` |
+| \`filesDir\`（设置页） | 文件管理目录（默认 files/），Web 上传的文件放这里 |
 
 ## 流水线 execList
 
@@ -458,6 +521,8 @@ const HELP_MD = `# 配置说明
 \`target\` 必填：\`push\`（本机->远端）/ \`pull\`（远端->本机）。
 \`files\` 每条规则：\`local\`（本机路径）、\`remote\`（远端路径，绝对路径不能以 / 结尾）、\`mode\`（权限）、\`overwrite\`（覆盖开关）。
 文件/文件夹均可，文件夹递归传输保持目录结构。**同名文件默认跳过**，overwrite:true 才覆盖。
+
+**Web 上传文件**：在「文件」页上传安装包/脚本到文件目录（默认 files/），配置里 \`local: "files/xxx.tar.gz"\` 即可推送到服务器；上传后可一键复制引用路径。
 
 ### command 模块（命令/脚本执行）
 \`target\`：\`local\`（本机）/ \`remote\`（远端，默认）。

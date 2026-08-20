@@ -20,12 +20,15 @@ func newTestWebServer(t *testing.T) (*webServer, http.Handler, string) {
 	dir := t.TempDir()
 	settingsPath := filepath.Join(dir, "settings.yaml")
 	cfgDir := filepath.Join(dir, "configs")
+	filesDir := filepath.Join(dir, "files")
 	os.MkdirAll(cfgDir, 0o755)
+	os.MkdirAll(filesDir, 0o755)
 	st, err := loadSettings(settingsPath)
 	if err != nil {
 		t.Fatalf("loadSettings 失败: %v", err)
 	}
 	st.ConfigsDir = cfgDir
+	st.FilesDir = filesDir
 	s := &webServer{
 		settings:     st,
 		settingsPath: settingsPath,
