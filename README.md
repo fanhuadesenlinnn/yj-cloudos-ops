@@ -63,8 +63,8 @@ CloudOS 7.0 虚拟机检查工具（Golang）
 ./yj-cloudos-ops -stop
 ```
 
-- **后台化原理**：Windows 用 `DETACHED_PROCESS` 脱离控制台；Linux/macOS 用 `Setsid` 新会话，不受终端关闭/SIGHUP 影响
-- **PID 文件** `web.pid`（与 settings.yaml 同目录）：记录进程ID、shutdown token、端口；`-stop` 据此定位
+- **后台化原理**：Windows 用 `DETACHED_PROCESS` 脱离控制台；Linux/macOS 用 `Setsid` 新会话，不受终端关闭/SIGHUP 影响；`-daemon` 必须与 `-web` 搭配（单独使用会给出用法提示）
+- **PID 文件** `web.pid`（与 settings.yaml 同目录）：记录进程ID、shutdown token、端口；`-stop` 据此定位，停止前打印实例详情（PID/地址/日志）
 - **退出方式**：Web 页面「退出程序」按钮（需登录）或命令行 `-stop`（Unix 发 SIGTERM / Windows 走本机+token 的 shutdown 请求）；-stop 未运行时会提示
 - **日志**：程序自动写 `web.log`（前台/后台都写），设置页可查看尾部与下载
 

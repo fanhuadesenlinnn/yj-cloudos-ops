@@ -48,6 +48,16 @@ func main() {
 		return
 	}
 
+	// -daemon 必须与 -web 搭配使用（-daemon 只是后台化 Web 的修饰参数，单独用无意义）
+	if *daemonMode && !*webMode {
+		fmt.Fprintf(os.Stderr, "-daemon 必须与 -web 搭配使用\n\n")
+		fmt.Fprintf(os.Stderr, "用法示例:\n")
+		fmt.Fprintf(os.Stderr, "  %s -web -daemon              # 后台运行 Web（命令行窗口可关闭，日志写 web.log）\n", filepath.Base(os.Args[0]))
+		fmt.Fprintf(os.Stderr, "  %s -web -daemon -web-addr 0.0.0.0:8080\n", filepath.Base(os.Args[0]))
+		fmt.Fprintf(os.Stderr, "  %s -stop                      # 停止后台实例（读 web.pid 优雅退出）\n", filepath.Base(os.Args[0]))
+		os.Exit(1)
+	}
+
 	// Web 模式：浏览器管理配置与运行（CLI 模式保持原样）；-daemon 后台化
 	if *webMode {
 		runWeb(*webAddr, *webConfigs, *webSettings, *daemonMode)
@@ -154,11 +164,20 @@ func stopWebDaemon(settingsPath string) {
 		os.Exit(1)
 	}
 	if !processAlive(info.PID) {
-		fmt.Fprintf(os.Stderr, "后台实例 PID=%d 已不存在（可能是残留的 PID 文件），已清理\n", info.PID)
+		fmt.Fprintf(os.Stderr, "后台实例 PID=%d 已不存在（可能是残留的 PID 文件），已清理 %s\n", info.PID, path)
 		removePIDFile(path)
 		os.Exit(0)
 	}
-	fmt.Fprintf(os.Stderr, "正在停止后台实例 PID=%d ...\n", info.PID)
+	// 展示实例详情，确认停对对象
+	fmt.Fprintf(os.Stderr, "已找到后台实例:\n")
+	fmt.Fprintf(os.Stderr, "  进程 PID: %d\n", info.PID)
+	if info.Addr != "" {
+		fmt.Fprintf(os.Stderr, "  监听地址: http://%s\n", info.Addr)
+	}
+	if info.LogFile != "" {
+		fmt.Fprintf(os.Stderr, "  日志文件: %s\n", info.LogFile)
+	}
+	fmt.Fprintf(os.Stderr, "正在停止 ...\n")
 	if err := requestShutdown(info); err != nil {
 		fmt.Fprintf(os.Stderr, "停止失败: %v\n", err)
 		os.Exit(1)
@@ -169,11 +188,11 @@ func stopWebDaemon(settingsPath string) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	if processAlive(info.PID) {
-		fmt.Fprintf(os.Stderr, "已发送退出信号，但进程仍在运行（等待稍后自行退出或手动结束）\n")
+		fmt.Fprintf(os.Stderr, "已发送退出信号，但进程仍在运行（等待稍后自行退出，或手动结束 PID=%d）\n", info.PID)
 		os.Exit(1)
 	}
-	fmt.Fprintf(os.Stderr, "已停止\n")
 	removePIDFile(path)
+	fmt.Fprintf(os.Stderr, "已停止（%s 已清理）\n", path)
 }
 
 // initExampleConfig 生成示例配置文件到指定路径；已存在则不覆盖（返回错误提示）。
