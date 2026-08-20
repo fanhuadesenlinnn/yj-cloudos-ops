@@ -81,7 +81,14 @@ func resolveProject(c *Client, cfg *Config, name string) (*Project, error) {
 	return nil, fmt.Errorf("未找到名称为 %q 的项目。当前可识别项目: %v", name, known)
 }
 
-// exactMatchOne 精确名称匹配：0 个 -> found=false；1 个直接返回；多个同名交互选择
+// projectChooser 同名多项目选择器：CLI 默认屏幕交互（stdin），Web 模式替换为按预选 ID 匹配。
+// 运行前由调用方设置（Web 模式设置 webProjectID），用后即清。
+var projectChooser = chooseProject
+
+// webProjectID Web 模式下用户在同名项目中预选的 ID（run 请求携带）；chooser 按此匹配。
+var webProjectID string
+
+// exactMatchOne 精确名称匹配：0 个 -> found=false；1 个直接返回；多个同名按选择器决策
 func exactMatchOne(projects []*Project, name string) (*Project, bool, error) {
 	var matches []*Project
 	for _, p := range projects {
@@ -95,7 +102,7 @@ func exactMatchOne(projects []*Project, name string) (*Project, bool, error) {
 	case 1:
 		return matches[0], true, nil
 	default:
-		p, err := chooseProject(matches)
+		p, err := projectChooser(matches)
 		if err != nil {
 			return nil, false, err
 		}

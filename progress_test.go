@@ -8,7 +8,7 @@ import (
 // progressMgr 纯逻辑测试：不启动 ticker（不 start），只验证状态管理与行文本生成
 
 func TestProgressLineEmpty(t *testing.T) {
-	p := newProgressMgr(10)
+	p := newProgressMgr(10, nil)
 	line := p.line()
 	if !strings.Contains(line, "[0/10] 0%") || !strings.Contains(line, "完成: 0") {
 		t.Errorf("空进度行格式错误: %q", line)
@@ -19,7 +19,7 @@ func TestProgressLineEmpty(t *testing.T) {
 }
 
 func TestProgressBeginEnd(t *testing.T) {
-	p := newProgressMgr(3)
+	p := newProgressMgr(3, nil)
 	p.begin(&VM{IP: "10.0.0.1", Name: "web-01"})
 	line := p.line()
 	if !strings.Contains(line, "10.0.0.1") || !strings.Contains(line, "web-01") {
@@ -36,7 +36,7 @@ func TestProgressBeginEnd(t *testing.T) {
 }
 
 func TestProgressSetStep(t *testing.T) {
-	p := newProgressMgr(1)
+	p := newProgressMgr(1, nil)
 	p.begin(&VM{IP: "10.0.0.1", Name: "db-01", EIP: "1.2.3.4"})
 	// 用 EIP 更新步骤（模拟 useIp=eip 时按连接 IP 定位），应经别名解析到主 key
 	p.setStep("1.2.3.4", 2, 3, "部署")
@@ -45,7 +45,7 @@ func TestProgressSetStep(t *testing.T) {
 		t.Errorf("步骤进度未显示: %q", line)
 	}
 	// 步骤未开始时（stepTotal=0）不显示括号
-	p2 := newProgressMgr(1)
+	p2 := newProgressMgr(1, nil)
 	p2.begin(&VM{IP: "10.0.0.2"})
 	if strings.Contains(p2.line(), "(") {
 		t.Errorf("未开始步骤不应显示进度括号: %q", p2.line())
@@ -53,7 +53,7 @@ func TestProgressSetStep(t *testing.T) {
 }
 
 func TestProgressAliasCleanup(t *testing.T) {
-	p := newProgressMgr(1)
+	p := newProgressMgr(1, nil)
 	p.begin(&VM{IP: "10.0.0.1", EIP: "1.2.3.4"})
 	p.end(&VM{IP: "10.0.0.1", EIP: "1.2.3.4"})
 	// end 后别名应清理，重新 begin 同 IP 不应残留旧别名映射
@@ -65,7 +65,7 @@ func TestProgressAliasCleanup(t *testing.T) {
 }
 
 func TestProgressPercentRounding(t *testing.T) {
-	p := newProgressMgr(3)
+	p := newProgressMgr(3, nil)
 	p.end(&VM{IP: "10.0.0.1"})
 	if !strings.Contains(p.line(), "33%") {
 		t.Errorf("百分比取整错误: %q", p.line())

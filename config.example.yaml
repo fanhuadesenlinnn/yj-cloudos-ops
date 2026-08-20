@@ -139,8 +139,8 @@ raw:
 
 output:
   showPassword: true   # 屏幕是否显示密码，false 则显示 ******
-  csvPath: ""          # 留空不导出CSV，如 "result.csv"
-  excelPath: ""        # 留空不导出Excel，如 "result.xlsx"
+  dir: "results"       # 导出目录（相对/绝对），留空则不导出；文件名自动生成: <配置名>_<时间戳>.xlsx
+  # 示例: results/生产环境_20260820_153045.xlsx（同秒撞名自动追加序号）
   # command 步骤输出落盘目录（可选），留空不落盘；每个 command 步骤每个机器一个 .log:
   # 目录结构: scriptDir/<运行时间戳>/<机器名>_<内网IP>_<步骤名>.log，方便逐行排查完整输出
   scriptDir: ""

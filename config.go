@@ -106,8 +106,7 @@ type SSHCfg struct {
 
 type OutputCfg struct {
 	ShowPassword bool   `yaml:"showPassword"` // 屏幕是否显示密码，默认 true
-	CSVPath      string `yaml:"csvPath"`      // 为空则不导出 CSV
-	ExcelPath    string `yaml:"excelPath"`    // 为空则不导出 Excel
+	Dir          string `yaml:"dir"`         // 导出目录（相对/绝对），留空则不导出；文件名自动生成: <配置名>_<时间戳>.xlsx
 	ScriptDir    string `yaml:"scriptDir"`    // 脚本输出落盘目录（留空不落盘），目录结构 scriptDir/<运行时间戳>/<机器名>_<IP>.log
 }
 

@@ -39,15 +39,17 @@ type vmProgress struct {
 	stepName  string // 当前步骤名
 }
 
-// progressMgr 实时执行进度控制器：stderr 单行刷新，显示 完成数/总数/百分比，
-// 以及正在执行的主机（IP+主机名）与当前步骤。与 stderr 其他输出通过 clear/refresh 协调，
-// 避免互相覆盖（打印错误前先清行、打印完恢复进度行）。
+// progressMgr 实时执行进度控制器。
+// CLI 模式：sink 为 nil，stderr 单行刷新，显示 完成数/总数/百分比 + 正在执行的主机与当前步骤；
+// 与其他 stderr 输出通过 clear/refresh 协调，避免互相覆盖。
+// Web 模式：sink 非 nil（如 SSE 推送），每次状态变化调用 sink(p)，不输出到 stderr、不启动 ticker。
 type progressMgr struct {
 	mu      sync.Mutex
 	total   int
 	done    int
 	active  map[string]*vmProgress // key: 主机内网 IP（begin 注册）
 	aliases map[string]string      // 弹性IP(EIP) -> 主 key（内网IP），setStep/end 按实际连接 IP 解析
+	sink    func(p *progressMgr)   // Web 模式：状态变化回调（nil=CLI stderr 模式）
 	ticker  *time.Ticker
 	stopCh  chan struct{}
 	lastLen int // 上次输出行宽（显示宽度），清行用
@@ -56,8 +58,8 @@ type progressMgr struct {
 // maxProgressWidth 进度单行最大显示宽度（超出截断，保持终端干净）
 const maxProgressWidth = 120
 
-func newProgressMgr(total int) *progressMgr {
-	return &progressMgr{total: total, active: map[string]*vmProgress{}, aliases: map[string]string{}}
+func newProgressMgr(total int, sink func(p *progressMgr)) *progressMgr {
+	return &progressMgr{total: total, sink: sink, active: map[string]*vmProgress{}, aliases: map[string]string{}}
 }
 
 // start 启动实时刷新（每 500ms 重绘一次），并立即输出首行
@@ -141,9 +143,12 @@ func (p *progressMgr) end(vm *VM) {
 	p.refresh()
 }
 
-// clear 清掉当前进度行（其他 stderr 输出前调用）
+// clear 清掉当前进度行（其他 stderr 输出前调用；Web 模式 sink 非 nil 时 no-op，由客户端覆盖整行）
 func (p *progressMgr) clear() {
 	if p == nil {
+		return
+	}
+	if p.sink != nil {
 		return
 	}
 	p.mu.Lock()
@@ -157,9 +162,13 @@ func (p *progressMgr) clear() {
 	}
 }
 
-// refresh 立即重绘进度行
+// refresh 立即重绘进度行（CLI: stderr 清行重写；Web: 调用 sink 推送）
 func (p *progressMgr) refresh() {
 	if p == nil {
+		return
+	}
+	if p.sink != nil {
+		p.sink(p)
 		return
 	}
 	p.clear()
@@ -254,7 +263,9 @@ func truncateWidth(s string, max int) string {
 }
 // onceResults 是阶段一（本地 once 步骤）的结果，按下标与 cfg.EffectiveSteps() 对齐（非 once 步骤为 nil）；
 // globalStopped 表示阶段一因某 once 步骤失败（onError=stop）已全局终止。
-func runSSHTests(cfg *Config, vms []*VM, onceResults []*ExecStepResult, globalStopped bool) {
+// prog 非 nil 时使用传入的进度控制器（Web 模式带 sink 推送）；nil 时内部创建 CLI stderr 版。
+// onVM 非 nil 时每台主机执行完成（成功或失败）后调用，用于 Web 日志流。
+func runSSHTests(cfg *Config, vms []*VM, onceResults []*ExecStepResult, globalStopped bool, prog *progressMgr, onVM func(vm *VM)) {
 	total := len(vms)
 	if total == 0 {
 		return
@@ -262,9 +273,13 @@ func runSSHTests(cfg *Config, vms []*VM, onceResults []*ExecStepResult, globalSt
 	// 脚本输出落盘目录（output.scriptDir 配置了才开）
 	scriptDir := scriptLogDir(cfg)
 
-	// 实时进度：worker 领走即标记“执行中”，每步更新，完成后累计；stderr 单行刷新
-	sshProgress = newProgressMgr(total)
-	sshProgress.start()
+	// 实时进度：worker 领走即标记“执行中”，每步更新，完成后累计；CLI 模式 stderr 单行刷新
+	if prog == nil {
+		sshProgress = newProgressMgr(total, nil)
+		sshProgress.start()
+	} else {
+		sshProgress = prog
+	}
 	defer func() {
 		sshProgress.stop()
 		sshProgress = nil
@@ -295,6 +310,9 @@ func runSSHTests(cfg *Config, vms []*VM, onceResults []*ExecStepResult, globalSt
 					if scriptDir != "" && s.Type == "command" {
 						writeScriptLog(scriptDir, vm, s)
 					}
+				}
+				if onVM != nil {
+					onVM(vm)
 				}
 				sshProgress.end(vm)
 			}

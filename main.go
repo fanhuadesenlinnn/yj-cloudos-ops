@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -19,6 +20,10 @@ var (
 	showVer      = flag.Bool("v", false, "显示版本号")
 	listRegions  = flag.Bool("list-regions", false, "列出账号可见的区域ID（ProductCode=VM），用于填写 regionId")
 	listProjects = flag.Bool("list-projects", false, "列出账号可见的项目，用于填写 project.name")
+	webMode      = flag.Bool("web", false, "启动 Web 模式（浏览器管理配置/运行/导出）")
+	webAddr      = flag.String("web-addr", "0.0.0.0:8080", "Web 监听地址")
+	webConfigs   = flag.String("web-configs", "", "Web 配置目录（默认取 settings 里的 configsDir）")
+	webSettings  = flag.String("web-settings", "settings.yaml", "Web 设置文件路径")
 )
 
 func main() {
@@ -29,11 +34,19 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Web 模式：浏览器管理配置与运行（CLI 模式保持原样）
+	if *webMode {
+		runWeb(*webAddr, *webConfigs, *webSettings)
+		return
+	}
+
 	cfg, err := loadConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "加载配置失败: %v\n", err)
 		os.Exit(1)
 	}
+	// 配置名（导出文件命名用）：取配置文件 basename（configs/生产环境.yaml -> 生产环境）
+	profile := strings.TrimSuffix(filepath.Base(*configPath), filepath.Ext(*configPath))
 	client := newClient(cfg)
 
 	if *listRegions {
@@ -90,24 +103,17 @@ func main() {
 	}
 
 	// 3. SSH 登录测试 + 流水线步骤执行（并发，进度输出到 stderr）
-	runSSHTests(cfg, vms, onceResults, globalStopped)
+	runSSHTests(cfg, vms, onceResults, globalStopped, nil, nil)
 
-	// 4. 屏幕输出 + 可选导出
+	// 4. 屏幕输出 + 可选导出（Excel，文件名自动生成: <配置名>_<时间戳>.xlsx）
 	if err := outputTable(cfg, vms); err != nil {
 		fmt.Fprintf(os.Stderr, "屏幕输出失败: %v\n", err)
 	}
-	if cfg.Output.CSVPath != "" {
-		if err := exportCSV(cfg, vms); err != nil {
-			fmt.Fprintf(os.Stderr, "导出CSV失败: %v\n", err)
-		} else {
-			fmt.Fprintf(os.Stderr, "已导出CSV: %s\n", cfg.Output.CSVPath)
-		}
-	}
-	if cfg.Output.ExcelPath != "" {
-		if err := exportExcel(cfg, vms); err != nil {
+	if excelPath := autoExcelPath(profile, cfg); excelPath != "" {
+		if err := exportExcel(excelPath, vms); err != nil {
 			fmt.Fprintf(os.Stderr, "导出Excel失败: %v\n", err)
 		} else {
-			fmt.Fprintf(os.Stderr, "已导出Excel: %s\n", cfg.Output.ExcelPath)
+			fmt.Fprintf(os.Stderr, "已导出Excel: %s\n", excelPath)
 		}
 	}
 }

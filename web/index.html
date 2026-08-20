@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>yj-cloudos-ops Web</title>
+<style>
+:root { --bg:#f5f6f8; --card:#fff; --line:#e2e4e8; --text:#222; --muted:#888; --pri:#2563eb; --ok:#16a34a; --bad:#dc2626; }
+* { box-sizing:border-box; margin:0; padding:0; }
+body { font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--text); }
+.container { max-width:1200px; margin:0 auto; padding:16px; }
+.topbar { display:flex; align-items:center; gap:16px; padding:10px 0 14px; border-bottom:1px solid var(--line); margin-bottom:16px; }
+.topbar h1 { font-size:18px; }
+.tabs { display:flex; gap:4px; margin-left:auto; }
+.tab { padding:6px 14px; border:1px solid var(--line); background:#fff; border-radius:6px; cursor:pointer; }
+.tab.active { background:var(--pri); color:#fff; border-color:var(--pri); }
+.card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:16px; margin-bottom:16px; }
+.card h3 { font-size:15px; margin-bottom:10px; }
+.row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:10px; }
+label { color:var(--muted); font-size:13px; }
+select, input, textarea { padding:6px 8px; border:1px solid var(--line); border-radius:6px; font:inherit; background:#fff; }
+textarea { width:100%; min-height:380px; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12.5px; line-height:1.5; }
+button { padding:6px 16px; border:1px solid var(--line); border-radius:6px; background:#fff; cursor:pointer; font:inherit; }
+button:hover { border-color:var(--pri); color:var(--pri); }
+button.pri { background:var(--pri); color:#fff; border-color:var(--pri); }
+button.pri:hover { opacity:.9; color:#fff; }
+button.danger:hover { border-color:var(--bad); color:var(--bad); }
+button:disabled { opacity:.5; cursor:not-allowed; }
+table { width:100%; border-collapse:collapse; font-size:13px; }
+th, td { border:1px solid var(--line); padding:6px 8px; text-align:left; white-space:nowrap; }
+th { background:#f0f2f5; }
+tr.clickable { cursor:pointer; }
+tr.clickable:hover td { background:#f7f9ff; }
+.badge { display:inline-block; padding:1px 7px; border-radius:10px; font-size:12px; }
+.ok { background:#e6f7ec; color:var(--ok); }
+.bad { background:#fdeaea; color:var(--bad); }
+.muted { color:var(--muted); font-size:12px; }
+.hidden { display:none; }
+#progress-line { font-family:ui-monospace,Menlo,monospace; font-size:13px; white-space:pre-wrap; word-break:break-all; min-height:20px; }
+#logs { font-family:ui-monospace,Menlo,monospace; font-size:12px; background:#0f1115; color:#d4d4d4; border-radius:6px; padding:10px; height:160px; overflow-y:auto; white-space:pre-wrap; }
+#toast { position:fixed; top:16px; right:16px; background:#111; color:#fff; padding:10px 16px; border-radius:6px; opacity:0; transition:opacity .3s; z-index:99; max-width:400px; }
+.step-detail { white-space:pre-wrap; max-height:300px; overflow:auto; font-family:ui-monospace,Menlo,monospace; font-size:12px; background:#0f1115; color:#d4d4d4; border-radius:6px; padding:8px; }
+.login-box { max-width:340px; margin:120px auto; }
+.login-box .card { text-align:center; }
+.login-box input { width:100%; margin-bottom:10px; }
+.grid2 { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <!-- 登录 -->
+  <div id="login-view" class="hidden">
+    <div class="login-box card">
+      <h3 style="margin-bottom:14px">登录 yj-cloudos-ops</h3>
+      <input id="login-user" placeholder="账号">
+      <input id="login-pass" type="password" placeholder="密码">
+      <button class="pri" style="width:100%" onclick="login()">登 录</button>
+      <div class="muted" style="margin-top:10px">默认账号 admin / admin，登录后请在「设置」中修改</div>
+    </div>
+  </div>
+
+  <!-- 主界面 -->
+  <div id="main-view" class="hidden">
+    <div class="topbar">
+      <h1>yj-cloudos-ops</h1>
+      <div class="tabs">
+        <div class="tab active" data-tab="run" onclick="switchTab('run')">运行</div>
+        <div class="tab" data-tab="configs" onclick="switchTab('configs')">配置管理</div>
+        <div class="tab" data-tab="settings" onclick="switchTab('settings')">设置</div>
+        <div class="tab" onclick="logout()">退出</div>
+      </div>
+    </div>
+
+    <!-- 运行 -->
+    <div id="tab-run">
+      <div class="card">
+        <h3>运行</h3>
+        <div class="row">
+          <label>配置</label>
+          <select id="profile-select" onchange="onProfileChange()"></select>
+          <div id="project-group" class="hidden">
+            <label>项目</label>
+            <select id="project-select"></select>
+          </div>
+          <button class="pri" id="btn-run" onclick="startRun()">▶ 开始检查</button>
+          <button id="btn-export" class="hidden" onclick="exportExcel()">下载 Excel</button>
+        </div>
+        <div id="run-status" class="muted"></div>
+      </div>
+      <div class="card" id="progress-card">
+        <h3>实时进度</h3>
+        <div id="progress-line" class="muted">—</div>
+      </div>
+      <div class="card">
+        <h3>日志</h3>
+        <div id="logs"></div>
+      </div>
+      <div class="card" id="result-card">
+        <h3>结果 <span class="muted" id="result-meta"></span></h3>
+        <div style="overflow:auto"><table id="result-table"></table></div>
+      </div>
+    </div>
+
+    <!-- 配置管理 -->
+    <div id="tab-configs" class="hidden">
+      <div class="card">
+        <h3>配置列表 <button style="float:right" class="pri" onclick="newConfig()">+ 新建配置</button></h3>
+        <div style="overflow:auto"><table id="configs-table"></table></div>
+      </div>
+      <div class="card hidden" id="config-editor">
+        <h3 id="editor-title">编辑配置</h3>
+        <div class="row">
+          <label>配置名</label><input id="cfg-name" placeholder="如：生产环境" style="width:200px">
+          <label>描述</label><input id="cfg-desc" placeholder="一句话描述（保存为 # 描述: 注释）" style="flex:1;min-width:200px">
+        </div>
+        <textarea id="cfg-yaml" spellcheck="false" placeholder="粘贴完整 YAML 配置（endpoint/凭证/项目/execList 等）"></textarea>
+        <div class="row" style="margin-top:10px">
+          <button class="pri" onclick="saveConfig()">保存</button>
+          <button onclick="cancelEdit()">取消</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 设置 -->
+    <div id="tab-settings" class="hidden">
+      <div class="card">
+        <h3>登录账号</h3>
+        <div class="row"><label style="width:80px">用户名</label><input id="set-user" style="width:200px"></div>
+        <div class="row"><label style="width:80px">新密码</label><input id="set-pass" type="password" placeholder="留空则不修改" style="width:200px"></div>
+        <div class="muted" style="margin-bottom:10px">密码以加盐哈希存储，不保存明文</div>
+      </div>
+      <div class="card">
+        <h3>运行设置</h3>
+        <div class="row"><label style="width:80px">配置目录</label><input id="set-dir" style="width:300px" placeholder="如：configs"></div>
+        <div class="row"><label style="width:80px">历史保留</label><input id="set-history" type="number" min="1" max="100" style="width:80px"><span class="muted">条（重启即清空）</span></div>
+        <button class="pri" onclick="saveSettings()">保存设置</button>
+      </div>
+    </div>
+  </div>
+</div>
+<div id="toast"></div>
+
+<script>
+// ---------- 基础 ----------
+let currentJob = null;
+let es = null;
+let resultVMs = [];
+
+function $(id){ return document.getElementById(id); }
+function toast(msg){ const t=$('toast'); t.textContent=msg; t.style.opacity=1; setTimeout(()=>t.style.opacity=0, 3000); }
+async function api(url, opts){
+  const res = await fetch(url, Object.assign({headers:{'Content-Type':'application/json'}}, opts));
+  if (res.status === 401){ showLogin(); throw new Error('未登录'); }
+  if (!res.ok){ let msg = await res.text(); try { msg = (await res.json()).error || msg; } catch(e){} throw new Error(msg); }
+  return res.json();
+}
+
+// ---------- 登录 ----------
+function showLogin(){ $('main-view').classList.add('hidden'); $('login-view').classList.remove('hidden'); }
+async function login(){
+  try {
+    await api('/api/login', {method:'POST', body: JSON.stringify({username:$('login-user').value, password:$('login-pass').value})});
+    enterMain();
+  } catch(e){ toast(e.message); }
+}
+function logout(){ fetch('/api/logout', {method:'POST'}); showLogin(); }
+
+async function enterMain(){
+  $('login-view').classList.add('hidden'); $('main-view').classList.remove('hidden');
+  await loadSettingsForm();
+  await loadConfigs();
+  switchTab('run');
+}
+
+// ---------- Tab ----------
+function switchTab(name){
+  document.querySelectorAll('.tab[data-tab]').forEach(t=>t.classList.toggle('active', t.dataset.tab===name));
+  ['run','configs','settings'].forEach(t=>$('tab-'+t).classList.toggle('hidden', t!==name));
+  if (name==='configs') loadConfigs();
+  if (name==='settings') loadSettingsForm();
+}
+
+// ---------- 设置 ----------
+async function loadSettingsForm(){
+  const s = await api('/api/settings');
+  $('set-user').value = s.username; $('set-dir').value = s.configsDir; $('set-history').value = s.historySize;
+}
+async function saveSettings(){
+  try {
+    await api('/api/settings', {method:'POST', body: JSON.stringify({
+      username:$('set-user').value, password:$('set-pass').value,
+      configsDir:$('set-dir').value, historySize:parseInt($('set-history').value)||10})});
+    toast('设置已保存'); $('set-pass').value='';
+    await loadConfigs();
+  } catch(e){ toast(e.message); }
+}
+
+// ---------- 配置管理 ----------
+async function loadConfigs(){
+  const list = await api('/api/configs');
+  const tb = $('configs-table');
+  tb.innerHTML = '<tr><th>配置名</th><th>描述</th><th>修改时间</th><th>大小</th><th>操作</th></tr>' +
+    list.map(c=>`<tr>
+      <td>${esc(c.name)}</td><td>${esc(c.desc||'')}</td><td>${fmtTime(c.modTime)}</td><td>${c.size} B</td>
+      <td>
+        <button onclick="editConfig('${escAttr(c.name)}')">编辑</button>
+        <button onclick="copyConfig('${escAttr(c.name)}')">复制</button>
+        <button class="danger" onclick="delConfig('${escAttr(c.name)}')">删除</button>
+      </td></tr>`).join('') ||
+    '<tr><td colspan="5" class="muted">还没有配置，点击右上角「新建配置」创建</td></tr>';
+}
+async function newConfig(){
+  $('editor-title').textContent = '新建配置';
+  $('cfg-name').value=''; $('cfg-desc').value=''; $('cfg-yaml').value='';
+  $('config-editor').classList.remove('hidden');
+}
+async function editConfig(name){
+  try {
+    const c = await api('/api/configs/'+encodeURIComponent(name));
+    $('editor-title').textContent = '编辑配置：'+name;
+    $('cfg-name').value=c.name; $('cfg-desc').value=c.desc; $('cfg-yaml').value=c.yaml;
+    $('config-editor').classList.remove('hidden');
+  } catch(e){ toast(e.message); }
+}
+function cancelEdit(){ $('config-editor').classList.add('hidden'); }
+async function saveConfig(){
+  try {
+    await api('/api/configs', {method:'POST', body: JSON.stringify({
+      name:$('cfg-name').value, desc:$('cfg-desc').value, yaml:$('cfg-yaml').value})});
+    toast('配置已保存'); cancelEdit(); await loadConfigs(); await loadProfileSelect();
+  } catch(e){ toast(e.message); }
+}
+async function copyConfig(name){
+  const newName = prompt('新配置名：', name+'-副本');
+  if (!newName) return;
+  try {
+    await api('/api/configs/'+encodeURIComponent(name), {method:'POST', body: JSON.stringify({newName})});
+    toast('已复制'); await loadConfigs(); await loadProfileSelect();
+  } catch(e){ toast(e.message); }
+}
+async function delConfig(name){
+  if (!confirm('确定删除配置「'+name+'」？')) return;
+  try { await api('/api/configs/'+encodeURIComponent(name), {method:'DELETE'}); toast('已删除'); await loadConfigs(); await loadProfileSelect(); }
+  catch(e){ toast(e.message); }
+}
+
+// ---------- 运行 ----------
+async function loadProfileSelect(){
+  const list = await api('/api/configs');
+  const sel = $('profile-select');
+  const prev = sel.value;
+  sel.innerHTML = list.map(c=>`<option value="${escAttr(c.name)}">${esc(c.name)}${c.desc?' — '+esc(c.desc):''}</option>`).join('');
+  if (prev && list.some(c=>c.name===prev)) sel.value = prev;
+  onProfileChange();
+}
+async function onProfileChange(){
+  const name = $('profile-select').value;
+  $('project-group').classList.add('hidden');
+  $('project-select').innerHTML = '';
+  if (!name) return;
+  try {
+    const groups = await api('/api/projects?profile='+encodeURIComponent(name));
+    let needs = false;
+    groups.forEach(g=>{
+      if (g.mode==='all'){ needs = true; addOpt('project-select', 'all', '全部项目 (*)'); }
+      else if (g.candidates && g.candidates.length>1){
+        needs = true; g.candidates.forEach(c=>addOpt('project-select', c.id, c.name+' ('+c.id+')'));
+      }
+    });
+    if (needs) $('project-group').classList.remove('hidden');
+  } catch(e){ /* 平台不可达时忽略，运行时再报 */ }
+}
+function addOpt(sel, val, text){ const o=document.createElement('option'); o.value=val; o.textContent=text; sel.appendChild(o); }
+
+function startRun(){
+  const profile = $('profile-select').value;
+  if (!profile){ toast('请先选择配置'); return; }
+  const projectId = $('project-select').value || '';
+  const btn = $('btn-run'); btn.disabled = true; btn.textContent = '运行中…';
+  $('logs').textContent=''; $('result-table').innerHTML=''; $('btn-export').classList.add('hidden');
+  api('/api/run', {method:'POST', body: JSON.stringify({profile, projectId})})
+    .then(job => { currentJob = job; connectSSE(job.id); })
+    .catch(e => { toast(e.message); btn.disabled=false; btn.textContent='▶ 开始检查'; });
+}
+
+function connectSSE(jobId){
+  if (es) es.close();
+  es = new EventSource('/api/events?job='+jobId);
+  es.addEventListener('snapshot', e => applyEvent(JSON.parse(e.data), true));
+  es.addEventListener('progress', e => { const d=JSON.parse(e.data); $('progress-line').textContent = d.line; $('run-status').textContent = `完成 ${d.done}/${d.total} (${d.pct}%)`; });
+  es.addEventListener('log', e => { const d=JSON.parse(e.data); appendLog(d.line); });
+  es.addEventListener('finish', e => { const d=JSON.parse(e.data); onFinish(d); });
+  es.onerror = () => { /* 服务端关闭时 es 自动重连；finish 后由 onFinish 关闭 */ };
+}
+function appendLog(line){ const l=$('logs'); l.textContent += line+'\n'; l.scrollTop = l.scrollHeight; }
+
+function onFinish(summary){
+  if (es){ es.close(); es=null; }
+  const btn=$('btn-run'); btn.disabled=false; btn.textContent='▶ 开始检查';
+  currentJob = summary;
+  $('run-status').textContent = summary.status==='failed' ? ('运行失败：'+summary.error) : ('运行完成（'+summary.finishedAt+'）');
+  if (summary.status==='failed'){ toast('运行失败：'+summary.error); return; }
+  loadResult(summary.id);
+}
+async function loadResult(jobId){
+  try {
+    const r = await api('/api/result?job='+jobId);
+    resultVMs = r.vms || [];
+    $('result-meta').textContent = `共 ${resultVMs.length} 台`;
+    if (r.excelPath) $('btn-export').classList.remove('hidden');
+    renderTable(resultVMs);
+  } catch(e){ toast(e.message); }
+}
+function renderTable(vms){
+  const tb = $('result-table');
+  tb.innerHTML = '<tr><th>#</th><th>名称</th><th>类型</th><th>内网IP</th><th>EIP</th><th>规格</th><th>系统盘</th><th>数据盘</th><th>项目</th><th>密码</th><th>SSH登录</th><th>运行状态</th><th>服务</th><th>流水线</th></tr>' +
+    vms.map((v,i)=>`<tr class="clickable" onclick="toggleDetail(${i}, this)">
+      <td>${i+1}</td><td>${esc(v.name)}</td><td>${esc(v.type)}</td><td>${esc(v.ip)}</td><td>${esc(v.eip)}</td>
+      <td>${esc(v.spec)}</td><td>${esc(v.sysDisk)}</td><td>${esc(v.dataDisk)}</td><td>${esc(v.project)}</td>
+      <td>${esc(v.password)}</td><td>${esc(v.sshResult)}</td><td>${esc(v.statusLine)}</td>
+      <td>${esc(v.services.map(s=>s.name+':'+s.label).join(', '))}</td><td>${esc(v.pipelineStr)}</td>
+    </tr>`).join('') || '<tr><td colspan="14" class="muted">无数据</td></tr>';
+}
+function toggleDetail(i, tr){
+  const next = tr.nextElementSibling;
+  if (next && next.classList.contains('detail-row')){ next.remove(); return; }
+  const v = resultVMs[i];
+  const trd = document.createElement('tr'); trd.className='detail-row';
+  trd.innerHTML = '<td colspan="14"><div class="card" style="margin:0"><h4>步骤明细</h4>' +
+    (v.steps.length ? '<table>' +
+      '<tr><th>步骤</th><th>类型</th><th>目标</th><th>结果</th><th>退出码</th><th>耗时</th><th>错误</th><th>输出</th></tr>' +
+      v.steps.map(s=>`<tr><td>${esc(s.name)}</td><td>${esc(s.type)}</td><td>${esc(s.target)}</td><td>${esc(s.label)}</td><td>${s.exitCode}</td><td>${esc(s.duration)}</td><td>${esc(s.error||'')}</td><td><pre class="step-detail">${esc(s.output||'')}</pre></td></tr>`).join('')
+      : '<div class="muted">无流水线步骤</div>') + '</div></td>';
+  tr.after(trd);
+}
+
+function exportExcel(){
+  if (!currentJob) return;
+  window.location = '/api/export?job='+currentJob.id;
+}
+
+// ---------- 工具 ----------
+function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function escAttr(s){ return esc(s).replace(/"/g,'&quot;'); }
+function fmtTime(t){ if(!t) return ''; const d=new Date(t); return d.toLocaleString(); }
+
+// 启动：检查登录态
+api('/api/settings').then(()=>enterMain()).catch(()=>showLogin());
+</script>
+</body>
+</html>

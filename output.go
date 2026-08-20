@@ -1,12 +1,12 @@
 package main
 
 import (
-	"encoding/csv"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/xuri/excelize/v2"
 )
@@ -284,77 +284,31 @@ func printProjects(client *Client) error {
 
 // ---------- 导出 CSV（配置了路径才导出） ----------
 
-func exportCSV(cfg *Config, vms []*VM) error {
-	f, err := os.Create(cfg.Output.CSVPath)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
+// ---------- 导出 Excel（配置了 output.dir 才导出） ----------
 
-	// UTF-8 BOM，便于 Excel 直接打开中文不乱码
-	if _, err := f.WriteString("\xEF\xBB\xBF"); err != nil {
-		return err
+// autoExcelPath 生成导出文件路径：<output.dir>/<配置名>_<时间戳>.xlsx；
+// 同秒撞名时自动追加序号避免覆盖；dir 为空返回空串（不导出）。
+func autoExcelPath(profile string, cfg *Config) string {
+	dir := cfg.Output.Dir
+	if dir == "" {
+		return ""
 	}
-	w := csv.NewWriter(f)
-	defer w.Flush()
-
-	header := []string{"序号", "虚拟机名称", "类型", "实例ID", "内网IP", "EIP", "MAC", "状态",
-		"规格编码", "规格描述", "CPU核数", "内存G", "系统盘大小G", "系统盘类型", "系统盘描述",
-		"数据盘", "项目名称", "项目ID", "root密码", "SSH登录结果", "服务状态", "流水线",
-		"操作系统", "内核版本", "运行时长", "负载(1/5/15)",
-		"CPU使用率%", "内存总量", "内存已用", "内存使用率%",
-		"根分区总量", "根分区已用", "根分区使用率%"}
-	if err := w.Write(header); err != nil {
-		return err
+	ts := time.Now().Format("20060102_150405")
+	base := sanitizeFileName(profile) + "_" + ts
+	path := filepath.Join(dir, base+".xlsx")
+	for i := 1; fileExists(path); i++ {
+		path = filepath.Join(dir, fmt.Sprintf("%s_%d.xlsx", base, i))
 	}
-	for i, vm := range vms {
-		row := []string{
-			itoa(i + 1),
-			vm.Name,
-			vm.Type,
-			vm.ID,
-			vm.IP,
-			vm.EIP,
-			vm.MAC,
-			vm.Status,
-			vm.SpecCode,
-			vm.SpecName,
-			itoa(vm.CPU),
-			itoa(vm.Memory),
-			itoa(vm.SysDisk.Size),
-			diskShortType(vm.SysDisk),
-			vm.SysDiskDesc,
-			dataDiskStr(vm),
-			vm.ProjectName,
-			vm.ProjectID,
-			vm.Password,
-			vm.SSHResult,
-			servicesStr(vm),
-			pipelineStr(vm),
-		}
-		row = append(row, statusCSVFields(vm)...)
-		if err := w.Write(row); err != nil {
-			return err
-		}
-	}
-	return nil
+	return path
 }
 
-// statusCSVFields 服务器运行状态明细列
-func statusCSVFields(vm *VM) []string {
-	s := vm.ServerStatus
-	if s == nil {
-		return []string{"", "", "", "", "", "", "", "", "", "", ""}
-	}
-	return []string{s.OS, s.Kernel, s.Uptime, s.LoadAvg,
-		s.CPUUsed, s.MemTotal, s.MemUsed, s.MemUsedPct,
-		s.DiskTotal, s.DiskUsed, s.DiskUsePct}
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
 }
 
-// ---------- 导出 Excel（配置了路径才导出） ----------
-
-func exportExcel(cfg *Config, vms []*VM) error {
-	if err := os.MkdirAll(filepath.Dir(cfg.Output.ExcelPath), 0o755); err != nil {
+func exportExcel(path string, vms []*VM) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
 	f := excelize.NewFile()
@@ -494,7 +448,7 @@ func exportExcel(cfg *Config, vms []*VM) error {
 		return err
 	}
 
-	if err := f.SaveAs(cfg.Output.ExcelPath); err != nil {
+	if err := f.SaveAs(path); err != nil {
 		return err
 	}
 	return nil

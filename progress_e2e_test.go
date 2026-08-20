@@ -27,7 +27,7 @@ func TestProgressRunSSHTestsE2E(t *testing.T) {
 			Password: "Test@12345",
 		})
 	}
-	runSSHTests(cfg, vms, nil, false)
+	runSSHTests(cfg, vms, nil, false, nil, nil)
 
 	for i, vm := range vms {
 		if vm.SSHResult == "" || !strings.HasPrefix(vm.SSHResult, "✓") {
