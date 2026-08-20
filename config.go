@@ -12,19 +12,19 @@ import (
 
 // Config 全部运行参数从 YAML 配置文件读取
 type Config struct {
-	Endpoint           string      `yaml:"endpoint"`           // API 服务地址，如 https://k8sVIP:30990
-	InsecureSkipVerify bool        `yaml:"insecureSkipVerify"` // 跳过证书校验
-	AccessKeyID        string      `yaml:"accessKeyId"`        // 平台凭证 AK
-	AccessKeySecret    string      `yaml:"accessKeySecret"`    // 平台凭证 SK
-	RegionID           string      `yaml:"regionId"`           // 区域ID
-	Project            ProjectCfg  `yaml:"project"`
-	Resource           ResourceCfg `yaml:"resource"`
-	HTTP               HTTPCfg     `yaml:"http"`
+	Endpoint           string        `yaml:"endpoint"`           // API 服务地址，如 https://k8sVIP:30990
+	InsecureSkipVerify bool          `yaml:"insecureSkipVerify"` // 跳过证书校验
+	AccessKeyID        string        `yaml:"accessKeyId"`        // 平台凭证 AK
+	AccessKeySecret    string        `yaml:"accessKeySecret"`    // 平台凭证 SK
+	RegionID           string        `yaml:"regionId"`           // 区域ID
+	Project            ProjectCfg    `yaml:"project"`
+	Resource           ResourceCfg   `yaml:"resource"`
+	HTTP               HTTPCfg       `yaml:"http"`
 	Pagination         PaginationCfg `yaml:"pagination"`
-	SSH                SSHCfg       `yaml:"ssh"`
-	ExecList           []ExecStep   `yaml:"execList"` // 流水线步骤列表（按顺序执行）；未配置时使用默认流水线（status -> services）
-	Raw                RawCfg       `yaml:"raw"`
-	Output             OutputCfg    `yaml:"output"`
+	SSH                SSHCfg        `yaml:"ssh"`
+	ExecList           []ExecStep    `yaml:"execList"` // 流水线步骤列表（按顺序执行）；未配置时使用默认流水线（status -> services）
+	Raw                RawCfg        `yaml:"raw"`
+	Output             OutputCfg     `yaml:"output"`
 }
 
 // ExecStep 一个流水线模块。步骤按配置顺序执行，前一步失败（且 onError=stop）则后续步骤不执行。
@@ -33,6 +33,7 @@ type Config struct {
 //   - command  命令执行模块（target 支持 local/remote）：先 cd 到 workdir（可选）再执行命令/脚本
 //   - services 服务状态检查模块（target 固定 remote）：检查远端服务运行状态（如 sshd/docker）
 //   - status   服务器运行状态采集模块（target 固定 remote）：采集 OS/负载/CPU/内存/磁盘
+//
 // target 字段按模块取不同语义：files 模块为传输方向 push/pull（必填）；command 模块为执行位置 local/remote（缺省 remote）。
 // run 字段：once（本地步骤只跑一次，默认） / always（每台服务器都跑）
 // onError 字段：stop（失败终止后续步骤，默认） / continue（失败后继续下一步）
@@ -329,6 +330,9 @@ func StepOnError(s ExecStep) string {
 }
 
 // StepCommandContent 获取 command 步骤的执行内容：command 优先，其次 scriptPath 读取本地文件，再次内嵌 script。
+// scriptPath 读取文件后统一换行符为 \n：Windows(CRLF)/老Mac(CR) 的脚本若原样传给远端/本机 bash，
+// 行尾 \r 会被当作命令/参数的一部分，导致 "$'\r': command not found"、if/for 语法错误、
+// 变量尾随 \r 等（YAML 内嵌 script 已由解析器归一化为 \n，仅需处理文件读取）。
 func StepCommandContent(s ExecStep) (string, error) {
 	switch {
 	case s.Command != "":
@@ -338,7 +342,9 @@ func StepCommandContent(s ExecStep) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("读取脚本文件 %s 失败: %w", s.ScriptPath, err)
 		}
-		return string(data), nil
+		text := strings.ReplaceAll(string(data), "\r\n", "\n") // Windows CRLF -> LF
+		text = strings.ReplaceAll(text, "\r", "\n")            // 老 Mac 单独 CR -> LF
+		return text, nil
 	default:
 		return s.Script, nil
 	}

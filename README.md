@@ -128,7 +128,7 @@ git push origin v1.0.0
     type: command
     target: remote
     workdir: "/opt/app"                   # 可选：执行前先 cd（远端要求绝对路径）
-    scriptPath: "scripts/deploy.sh"       # 内容走 stdin 传远端 bash -s，无转义/注入问题
+    scriptPath: "scripts/deploy.sh"       # 内容走 stdin 传远端 bash -s，无转义/注入问题；Windows(CRLF) 格式脚本自动归一化为 \n
     timeout: 60s
   ```
 - `services`（检查服务运行状态，target 固定 remote）

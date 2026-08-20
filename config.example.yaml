@@ -66,7 +66,7 @@ execList:
     #   target: local
     #   run: once          # 只跑一次（默认），不重复执行
     #   workdir: "/home/ci/app"        # 可选：先进入该目录（本地执行）
-    #   command: "go build -o dist/app ."   # 单行命令；或 script: 内嵌多行 / scriptPath: 本地脚本文件
+    #   command: "go build -o dist/app ."   # 单行命令；或 script: 内嵌多行 / scriptPath: 本地脚本文件（CRLF 自动转 \n）
     #   timeout: 120s      # 单次执行超时，默认 60s
 
     # ---- 示例2: files 模块 push（本机 -> 远端，传输文件/文件夹）----

@@ -223,6 +223,24 @@ func TestStepCommandContent(t *testing.T) {
 	if err != nil || content != "echo from-file\n" {
 		t.Errorf("文件脚本内容错误: %q err=%v", content, err)
 	}
+	// scriptPath 文件为 Windows CRLF -> 统一为 \n
+	crlfPath := filepath.Join(dir, "win.sh")
+	if err := os.WriteFile(crlfPath, []byte("echo a\r\necho b\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	content, err = StepCommandContent(ExecStep{ScriptPath: crlfPath})
+	if err != nil || content != "echo a\necho b\n" {
+		t.Errorf("CRLF 文件应归一化为 \\n: %q err=%v", content, err)
+	}
+	// scriptPath 文件为老 Mac 单独 CR -> 统一为 \n
+	crPath := filepath.Join(dir, "mac.sh")
+	if err := os.WriteFile(crPath, []byte("echo a\recho b\r"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	content, err = StepCommandContent(ExecStep{ScriptPath: crPath})
+	if err != nil || content != "echo a\necho b\n" {
+		t.Errorf("单独 CR 文件应归一化为 \\n: %q err=%v", content, err)
+	}
 	// 文件不存在 -> 报错
 	content, err = StepCommandContent(ExecStep{ScriptPath: filepath.Join(dir, "not-exist.sh")})
 	if err == nil {

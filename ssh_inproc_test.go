@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -209,6 +210,34 @@ func TestScriptExecInProc(t *testing.T) {
 		t.Errorf("中文/特殊字符输出缺失: %q", s.Output)
 	}
 	t.Logf("脚本输出: %s", s.Output)
+}
+
+// scriptPath 读取 Windows CRLF 脚本：换行符归一化为 \n 后远端 bash 才能正确执行
+// （修复前 \r 残留会导致 if/then 语法错误、变量尾随 \r）
+func TestScriptPathCRLFInProc(t *testing.T) {
+	addr := startInProcSSHServer(t, "Test@12345")
+	cfg := inProcSSHCfg(addr)
+
+	path := filepath.Join(t.TempDir(), "deploy.sh")
+	if err := os.WriteFile(path, []byte("if [ -f /etc/hostname ]\r\n"+
+		"then\r\n"+
+		"  echo crlf-ok\r\n"+
+		"fi\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg.ExecList = []ExecStep{{Name: "CRLF脚本", Type: "command", Target: "remote", ScriptPath: path, Timeout: "5s"}}
+
+	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
+	if err != nil {
+		t.Fatalf("trySSH 失败: %v", err)
+	}
+	s := steps[0]
+	if s == nil || s.State != "success" || s.ExitCode != 0 {
+		t.Fatalf("CRLF 脚本应成功执行: %+v", s)
+	}
+	if !strings.Contains(s.Output, "crlf-ok") {
+		t.Errorf("CRLF 脚本输出缺失: %q", s.Output)
+	}
 }
 
 // 非零退出码：标记失败(State=fail)但登录结果不受影响
