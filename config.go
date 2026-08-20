@@ -29,42 +29,44 @@ type Config struct {
 
 // ExecStep 一个流水线模块。步骤按配置顺序执行，前一步失败（且 onError=stop）则后续步骤不执行。
 // 支持的模块类型：
-//   - upload   上传模块（target 固定 remote）：传输本地文件/文件夹到远端，远端目标精确到文件
-//   - script   脚本/命令模块（target 支持 local/remote）：在本机或远端服务器执行命令/脚本
+//   - files    文件传输模块：push（本机 -> 远端）/ pull（远端 -> 本机），支持文件/文件夹
+//   - command  命令执行模块（target 支持 local/remote）：先 cd 到 workdir（可选）再执行命令/脚本
 //   - services 服务状态检查模块（target 固定 remote）：检查远端服务运行状态（如 sshd/docker）
 //   - status   服务器运行状态采集模块（target 固定 remote）：采集 OS/负载/CPU/内存/磁盘
+// target 字段按模块取不同语义：files 模块为传输方向 push/pull（必填）；command 模块为执行位置 local/remote（缺省 remote）。
 // run 字段：once（本地步骤只跑一次，默认） / always（每台服务器都跑）
 // onError 字段：stop（失败终止后续步骤，默认） / continue（失败后继续下一步）
 type ExecStep struct {
 	Name    string `yaml:"name"`    // 步骤名，展示/结果表用；缺省自动生成 step1/step2...
-	Type    string `yaml:"type"`    // upload / script / services / status
-	Target  string `yaml:"target"`  // local / remote；script 可配置，其余类型固定
-	Run     string `yaml:"run"`     // once / always；缺省: local=once, remote=always
+	Type    string `yaml:"type"`    // files / command / services / status
+	Target  string `yaml:"target"`  // files: push/pull（传输方向，必填）；command: local/remote（执行位置）；services/status 固定 remote
+	Run     string `yaml:"run"`     // once / always；缺省: local=once, remote=always（仅 command target=local 有意义）
 	OnError string `yaml:"onError"` // stop / continue；缺省 stop
 
-	// upload 模块字段（Type=upload）
-	Files     []StepUploadFile `yaml:"files"`     // 传输规则列表：本地文件/文件夹 -> 远端精确文件路径
-	Overwrite *bool            `yaml:"overwrite"` // 步骤级默认是否覆盖远端同名文件；缺省 false（已存在则跳过），单条规则 overwrite 优先
-	Mkdirs    *bool            `yaml:"mkdirs"`    // 远端父目录不存在时自动创建；缺省 true
+	// files 模块字段（Type=files）
+	Files     []StepUploadFile `yaml:"files"`     // 传输规则列表；push: local(本机源) -> remote(远端目标)；pull: remote(远端源) -> local(本机目标)
+	Overwrite *bool            `yaml:"overwrite"` // 步骤级默认是否覆盖目标端同名文件；缺省 false（已存在则跳过），单条规则 overwrite 优先
+	Mkdirs    *bool            `yaml:"mkdirs"`    // 目标端父目录不存在时自动创建；缺省 true
 
-	// script 模块字段（Type=script）
-	Command       string `yaml:"command"`       // 单行命令（本地: 经 shell 执行；远端: 经 bash 执行），与 script/scriptPath 三选一
-	Script        string `yaml:"script"`        // 内嵌脚本内容（多行，经 stdin 传远端 bash -s；本地则经 shell 执行）
-	ScriptPath    string `yaml:"scriptPath"`    // 本地脚本文件路径，读取内容后执行
-	Timeout       string `yaml:"timeout"`       // 单次执行超时，默认 60s；超时强制中断并标记失败
-	RemoteWorkDir string `yaml:"remoteWorkDir"` // 远端执行前先 cd 到的目录（绝对路径），配合 upload 把脚本传到该目录后运行
+	// command 模块字段（Type=command）
+	Command    string `yaml:"command"`    // 单行命令（本地: 经 shell 执行；远端: 经 bash 执行），与 script/scriptPath 三选一
+	Script     string `yaml:"script"`     // 内嵌脚本内容（多行，经 stdin 传远端 bash -s；本地则经 shell 执行）
+	ScriptPath string `yaml:"scriptPath"` // 本地脚本文件路径，读取内容后执行
+	Timeout    string `yaml:"timeout"`    // 单次执行超时，默认 60s；超时强制中断并标记失败
+	Workdir    string `yaml:"workdir"`    // 执行前先进入的工作目录（可选）：远端为 cd 目录（绝对路径），本地为 cmd.Dir
 
 	// services 模块字段（Type=services）
 	Services []string `yaml:"services"` // 要检查的服务名列表；留空默认检查 sshd
 }
 
-// StepUploadFile 一条上传规则：本地文件或文件夹 -> 远端精确文件路径
-// local 为文件夹时递归传输，每个文件按相对路径映射到 remote 目录下（远端目标精确到文件）。
+// StepUploadFile 一条传输规则（files 模块）
+// push 方向：local=本地源（文件/文件夹，文件夹递归传输保持结构），remote=远端目标（精确到文件）
+// pull 方向：remote=远端源（文件/文件夹，递归拉取保持结构），local=本机目标（文件或目录）
 type StepUploadFile struct {
-	Local     string `yaml:"local"`     // 本地文件或文件夹路径
-	Remote    string `yaml:"remote"`    // 远端目标：local 为文件时是精确文件路径；local 为文件夹时是目标目录
-	Mode      string `yaml:"mode"`      // 远端文件权限，八进制字符串如 "0755" / "644"，默认 0644
-	Overwrite *bool  `yaml:"overwrite"` // 是否覆盖远端同名文件；缺省用步骤级 overwrite
+	Local     string `yaml:"local"`     // 本机路径：push=源 / pull=目标
+	Remote    string `yaml:"remote"`    // 远端路径：push=目标 / pull=源
+	Mode      string `yaml:"mode"`      // 目标端文件权限，八进制字符串如 "0755" / "644"，默认 0644
+	Overwrite *bool  `yaml:"overwrite"` // 是否覆盖目标端同名文件；缺省用步骤级 overwrite
 }
 
 type RawCfg struct {
@@ -174,14 +176,17 @@ func validateExecList(steps []ExecStep) error {
 		return nil // 未配置 exec-list：走默认流水线（status -> services）
 	}
 	for i, s := range steps {
-		prefix := fmt.Sprintf("execList.steps[%d]", i)
+		prefix := fmt.Sprintf("execList[%d]", i)
 		switch s.Type {
-		case "upload":
-			if s.Target != "" && s.Target != "remote" {
-				return fmt.Errorf("%s: upload 模块 target 只能为 remote（得到 %q）", prefix, s.Target)
+		case "files":
+			// files 模块 target 必填且只能为 push / pull（传输方向，强制写清）
+			switch s.Target {
+			case "push", "pull":
+			default:
+				return fmt.Errorf("%s: files 模块 target 必填且只能为 push / pull（得到 %q）", prefix, s.Target)
 			}
 			if len(s.Files) == 0 {
-				return fmt.Errorf("%s: upload 模块必须配置 files", prefix)
+				return fmt.Errorf("%s: files 模块必须配置 files", prefix)
 			}
 			for j, f := range s.Files {
 				fp := fmt.Sprintf("%s.files[%d]", prefix, j)
@@ -191,10 +196,11 @@ func validateExecList(steps []ExecStep) error {
 				if f.Remote == "" {
 					return fmt.Errorf("%s.remote 不能为空", fp)
 				}
+				// 远端路径（push 的目标 / pull 的源）必须是绝对路径
 				if !strings.HasPrefix(f.Remote, "/") {
 					return fmt.Errorf("%s.remote 必须是远端绝对路径（以 / 开头）: %s", fp, f.Remote)
 				}
-				if strings.HasSuffix(f.Remote, "/") {
+				if s.Target == "push" && strings.HasSuffix(f.Remote, "/") {
 					return fmt.Errorf("%s.remote 必须精确到文件（不能以 / 结尾）: %s", fp, f.Remote)
 				}
 				if f.Mode != "" {
@@ -206,14 +212,14 @@ func validateExecList(steps []ExecStep) error {
 			if err := validateRunOnError(s, prefix); err != nil {
 				return err
 			}
-		case "script":
+		case "command":
 			switch s.Target {
 			case "", "local", "remote":
 			default:
-				return fmt.Errorf("%s: script 模块 target 只能为 local / remote（得到 %q）", prefix, s.Target)
+				return fmt.Errorf("%s: command 模块 target 只能为 local / remote（得到 %q）", prefix, s.Target)
 			}
 			if s.Command == "" && s.Script == "" && s.ScriptPath == "" {
-				return fmt.Errorf("%s: script 模块必须配置 command / script / scriptPath 之一", prefix)
+				return fmt.Errorf("%s: command 模块必须配置 command / script / scriptPath 之一", prefix)
 			}
 			n := 0
 			for _, v := range []string{s.Command, s.Script, s.ScriptPath} {
@@ -222,15 +228,16 @@ func validateExecList(steps []ExecStep) error {
 				}
 			}
 			if n > 1 {
-				return fmt.Errorf("%s: script 模块的 command / script / scriptPath 只能配置一个", prefix)
+				return fmt.Errorf("%s: command 模块的 command / script / scriptPath 只能配置一个", prefix)
 			}
 			if s.Timeout != "" {
 				if d, err := time.ParseDuration(s.Timeout); err != nil || d <= 0 {
 					return fmt.Errorf("%s.timeout 非法: %q", prefix, s.Timeout)
 				}
 			}
-			if s.RemoteWorkDir != "" && !strings.HasPrefix(s.RemoteWorkDir, "/") {
-				return fmt.Errorf("%s.remoteWorkDir 必须是远端绝对路径（以 / 开头）: %s", prefix, s.RemoteWorkDir)
+			// workdir 可选；远端执行时必须是绝对路径（cd 目标明确），本地执行允许相对路径
+			if s.Workdir != "" && s.Target != "local" && !strings.HasPrefix(s.Workdir, "/") {
+				return fmt.Errorf("%s.workdir 必须是远端绝对路径（以 / 开头）: %s", prefix, s.Workdir)
 			}
 			if err := validateRunOnError(s, prefix); err != nil {
 				return err
@@ -250,7 +257,7 @@ func validateExecList(steps []ExecStep) error {
 				return err
 			}
 		default:
-			return fmt.Errorf("%s.type 取值非法: %q（支持 upload / script / services / status）", prefix, s.Type)
+			return fmt.Errorf("%s.type 取值非法: %q（支持 files / command / services / status）", prefix, s.Type)
 		}
 	}
 	return nil
@@ -288,7 +295,8 @@ func StepName(s ExecStep, idx int) string {
 	return "step" + itoa(idx+1)
 }
 
-// StepTarget 步骤目标：未配置时按类型取默认（upload/services/status 固定 remote；script 默认 remote）
+// StepTarget 步骤 target 原始值：files 模块为传输方向 push/pull；command 模块为执行位置 local/remote（缺省 remote）；
+// services/status 固定 remote。
 func StepTarget(s ExecStep) string {
 	if s.Target != "" {
 		return s.Target
@@ -296,12 +304,17 @@ func StepTarget(s ExecStep) string {
 	return "remote"
 }
 
+// StepIsLocal 步骤是否在本机执行（command 模块 target=local；files/services/status 均在远端执行）
+func StepIsLocal(s ExecStep) bool {
+	return s.Type == "command" && StepTarget(s) == "local"
+}
+
 // StepRunMode 步骤运行方式：once（本地步骤默认）/ always（远端步骤默认）
 func StepRunMode(s ExecStep) string {
 	if s.Run != "" {
 		return s.Run
 	}
-	if StepTarget(s) == "local" {
+	if StepIsLocal(s) {
 		return "once"
 	}
 	return "always"
@@ -315,8 +328,8 @@ func StepOnError(s ExecStep) string {
 	return "stop"
 }
 
-// StepScriptContent 获取 script 步骤的执行内容：command 优先，其次 scriptPath 读取本地文件，再次内嵌 script。
-func StepScriptContent(s ExecStep) (string, error) {
+// StepCommandContent 获取 command 步骤的执行内容：command 优先，其次 scriptPath 读取本地文件，再次内嵌 script。
+func StepCommandContent(s ExecStep) (string, error) {
 	switch {
 	case s.Command != "":
 		return s.Command, nil
@@ -331,17 +344,17 @@ func StepScriptContent(s ExecStep) (string, error) {
 	}
 }
 
-// StepTimeout 单次脚本执行超时（默认 60s）
+// StepTimeout 单次命令执行超时（默认 60s）
 func StepTimeout(s ExecStep) time.Duration {
 	return parseDuration(s.Timeout, 60*time.Second)
 }
 
-// StepMkdirsEnabled 远端父目录不存在时是否自动创建（未配置默认 true）
+// StepMkdirsEnabled 目标端父目录不存在时是否自动创建（未配置默认 true）
 func StepMkdirsEnabled(s ExecStep) bool {
 	return s.Mkdirs == nil || *s.Mkdirs
 }
 
-// StepShouldOverwrite 单条上传规则是否覆盖同名文件：单文件 overwrite 优先，缺省用步骤级 overwrite
+// StepShouldOverwrite 单条传输规则是否覆盖目标端同名文件：单文件 overwrite 优先，缺省用步骤级 overwrite
 func StepShouldOverwrite(s ExecStep, f StepUploadFile) bool {
 	if f.Overwrite != nil {
 		return *f.Overwrite
@@ -349,7 +362,7 @@ func StepShouldOverwrite(s ExecStep, f StepUploadFile) bool {
 	return s.Overwrite != nil && *s.Overwrite
 }
 
-// StepFileMode 解析单条上传规则的远端权限（默认 0644）
+// StepFileMode 解析单条传输规则的目标端权限（默认 0644）
 func StepFileMode(s ExecStep, f StepUploadFile) (os.FileMode, error) {
 	if f.Mode == "" {
 		return 0o644, nil

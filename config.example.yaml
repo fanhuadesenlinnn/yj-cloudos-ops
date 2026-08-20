@@ -49,10 +49,11 @@ ssh:
 #
 # 步骤通用字段：
 #   name     步骤名（展示/结果表用，缺省自动生成 step1/step2...）
-#   type     模块类型: upload / script / services / status
-#   target   local（本机执行）/ remote（远端服务器执行）;
-#            upload/services/status 固定 remote；script 可配置，缺省 remote
-#   run      once（本地步骤只跑一次，缺省） / always（每台服务器都跑）; 仅 target=local 有意义
+#   type     模块类型: files / command / services / status
+#   target   files 模块为传输方向 push（本机->远端）/ pull（远端->本机），【必填】；
+#            command 模块为执行位置 local（本机）/ remote（远端），缺省 remote；
+#            services/status 固定 remote
+#   run      once（本地步骤只跑一次，缺省）/ always（每台服务器都跑）; 仅 command target=local 有意义
 #   onError  stop（失败终止后续步骤，缺省）/ continue（失败后继续下一步）
 #            注意: 本地 once 步骤失败且 onError=stop 时，全局终止（所有机器不再执行后续步骤）；
 #            远端步骤失败且 onError=stop 时，只终止该台机器的后续步骤。
@@ -61,42 +62,55 @@ ssh:
 execList:
     # ---- 示例1: 本地构建（只跑一次）----
     # - name: "本地构建打包"
-    #   type: script
+    #   type: command
     #   target: local
     #   run: once          # 只跑一次（默认），不重复执行
+    #   workdir: "/home/ci/app"        # 可选：先进入该目录（本地执行）
     #   command: "go build -o dist/app ."   # 单行命令；或 script: 内嵌多行 / scriptPath: 本地脚本文件
     #   timeout: 120s      # 单次执行超时，默认 60s
 
-    # ---- 示例2: 上传模块（传输文件/文件夹，远端精确到文件）----
-    # - name: "上传安装包"
-    #   type: upload                 # target 固定 remote
-    #   overwrite: true              # 步骤级默认覆盖远端同名文件；缺省 false=已存在则跳过（安全）
-    #   mkdirs: true                 # 远端父目录不存在时自动创建，缺省 true
+    # ---- 示例2: files 模块 push（本机 -> 远端，传输文件/文件夹）----
+    # - name: "分发安装包"
+    #   type: files
+    #   target: push                 # 传输方向，必填（push=本机->远端）
+    #   overwrite: true              # 步骤级默认覆盖目标端同名文件；缺省 false=已存在则跳过（安全）
+    #   mkdirs: true                 # 目标端父目录不存在时自动创建，缺省 true
     #   files:
-    #     - local: "dist/app.tar.gz"          # 本地文件
-    #       remote: "/opt/myapp/app.tar.gz"  # 远端精确文件路径（必须以 / 开头，不能以 / 结尾）
-    #       mode: "0644"                      # 远端权限，八进制，默认 0644
+    #     - local: "dist/app.tar.gz"          # 本机源（文件/文件夹）
+    #       remote: "/opt/myapp/app.tar.gz"  # 远端目标（精确文件路径，必须以 / 开头，不能以 / 结尾）
+    #       mode: "0644"                      # 目标端权限，八进制，默认 0644
     #       # overwrite: true                 # 单文件覆盖开关，优先于步骤级
-    #     - local: "configs/"                 # 本地文件夹：递归传输，保持目录结构
+    #     - local: "configs/"                 # 本机文件夹：递归传输，保持目录结构
     #       remote: "/opt/myapp/configs"      # 文件夹时远端为目标目录，每个文件映射为 目录/<相对路径>
-    #   onError: stop                # 任一文件上传失败则终止本台后续步骤（避免误跑旧文件）
+    #   onError: stop                # 任一文件传输失败则终止本台后续步骤（避免误跑旧文件）
 
-    # ---- 示例3: 远端部署脚本（每台机器都跑）----
+    # ---- 示例3: files 模块 pull（远端 -> 本机，收集/下载）----
+    # - name: "收集日志"
+    #   type: files
+    #   target: pull                 # 传输方向，必填（pull=远端->本机）
+    #   files:
+    #     - remote: "/var/log/app/"  # 远端源（文件夹：递归拉取保持目录结构）
+    #       local: "logs/app/"       # 本机目标目录
+    #     - remote: "/etc/app.conf"  # 单个文件
+    #       local: "logs/app.conf"
+    #   onError: continue
+
+    # ---- 示例4: command 模块（先 cd 到 workdir 再执行，每台机器都跑）----
     # - name: "远端部署"
-    #   type: script
+    #   type: command
     #   target: remote               # 在每台服务器上经 SSH 执行（内容走 stdin 传 bash -s，无转义问题）
-    #   scriptPath: "scripts/deploy.sh"   # 或 script: 内嵌多行 / command: 单行命令
-    #   remoteWorkDir: "/opt/myapp"       # 执行前先 cd 到该目录（配合 upload 把脚本传到该目录后运行）
+    #   workdir: "/opt/myapp"        # 可选：执行前先 cd 到该目录（配合 push 把脚本传到该目录后运行）
+    #   command: "bash deploy.sh"    # 直接运行命令；或 script: 内嵌多行 / scriptPath: 本地脚本文件
     #   timeout: 60s
     #   onError: stop
 
-    # ---- 示例4: 服务状态检查（原 ssh.services 模块收编为流水线步骤）----
+    # ---- 示例5: services 服务状态检查（原 ssh.services 模块收编为流水线步骤）----
     # - name: "检查服务"
     #   type: services              # target 固定 remote
     #   services: ["sshd", "docker"] # 留空默认检查 sshd；结果写入 Excel「服务运行状态」Sheet
     #   onError: continue
 
-    # ---- 示例5: 服务器运行状态采集（原 checkStatus 模块收编为流水线步骤）----
+    # ---- 示例6: status 服务器运行状态采集（原 checkStatus 模块收编为流水线步骤）----
     # - name: "采集运行状态"
     #   type: status                # target 固定 remote；结果写入 Excel「服务器运行状态」Sheet
     #   onError: continue
@@ -111,6 +125,6 @@ output:
   showPassword: true   # 屏幕是否显示密码，false 则显示 ******
   csvPath: ""          # 留空不导出CSV，如 "result.csv"
   excelPath: ""        # 留空不导出Excel，如 "result.xlsx"
-  # script 步骤输出落盘目录（可选），留空不落盘；每个 script 步骤每个机器一个 .log:
+  # command 步骤输出落盘目录（可选），留空不落盘；每个 command 步骤每个机器一个 .log:
   # 目录结构: scriptDir/<运行时间戳>/<机器名>_<内网IP>_<步骤名>.log，方便逐行排查完整输出
   scriptDir: ""

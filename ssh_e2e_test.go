@@ -20,7 +20,7 @@ func TestSSHE2E(t *testing.T) {
 	cfg.ExecList = []ExecStep{
 		{Name: "状态", Type: "status", OnError: "continue"},
 		{Name: "服务", Type: "services", Services: []string{"sshd", "docker", "nonexistent-svc"}, OnError: "continue"},
-		{Name: "脚本", Type: "script", Target: "remote", Script: "echo script-ok; hostname", Timeout: "5s"},
+		{Name: "命令", Type: "command", Target: "remote", Script: "echo script-ok; hostname", Timeout: "5s"},
 	}
 
 	status, services, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
@@ -69,7 +69,7 @@ func TestSSHE2EScriptFail(t *testing.T) {
 	cfg.SSH.Timeout = "5s"
 	cfg.SSH.VerifyCommand = "echo ok"
 	cfg.ExecList = []ExecStep{
-		{Name: "脚本", Type: "script", Target: "remote", Script: "echo before-fail; exit 7", Timeout: "5s"},
+		{Name: "命令", Type: "command", Target: "remote", Script: "echo before-fail; exit 7", Timeout: "5s"},
 	}
 
 	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
@@ -92,7 +92,7 @@ func TestSSHE2EScriptTimeout(t *testing.T) {
 	cfg.SSH.Timeout = "5s"
 	cfg.SSH.VerifyCommand = "echo ok"
 	cfg.ExecList = []ExecStep{
-		{Name: "脚本", Type: "script", Target: "remote", Script: "sleep 30", Timeout: "1s"},
+		{Name: "命令", Type: "command", Target: "remote", Script: "sleep 30", Timeout: "1s"},
 	}
 
 	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)

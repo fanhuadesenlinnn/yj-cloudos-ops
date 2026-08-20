@@ -157,7 +157,7 @@ func TestPrintStepFailure(t *testing.T) {
 		lines = append(lines, fmt.Sprintf("l%d", i))
 	}
 	vm := &VM{Name: "web-01", IP: "10.0.0.1"}
-	s := &ExecStepResult{Name: "部署", Type: "script", Target: "remote", ExitCode: 1, State: "fail", Error: "exit status 1", Output: strings.Join(lines, "\n")}
+	s := &ExecStepResult{Name: "部署", Type: "command", Target: "remote", ExitCode: 1, State: "fail", Error: "exit status 1", Output: strings.Join(lines, "\n")}
 	printStepFailure(vm, s)
 	w.Close()
 	out, _ := io.ReadAll(r)
@@ -183,7 +183,7 @@ func TestPrintStepFailure(t *testing.T) {
 func TestWriteScriptLog(t *testing.T) {
 	dir := t.TempDir()
 	vm := &VM{Name: "web/01:主", IP: "10.0.0.1"}
-	s := &ExecStepResult{Name: "部署脚本", Type: "script", Target: "remote", ExitCode: 7, State: "fail", Error: "exit status 7", Output: "line1\nline2"}
+	s := &ExecStepResult{Name: "部署命令", Type: "command", Target: "remote", ExitCode: 7, State: "fail", Error: "exit status 7", Output: "line1\nline2"}
 	writeScriptLog(dir, vm, s)
 
 	files, _ := filepath.Glob(filepath.Join(dir, "*"))
@@ -195,21 +195,21 @@ func TestWriteScriptLog(t *testing.T) {
 	}
 	data, _ := os.ReadFile(files[0])
 	content := string(data)
-	for _, want := range []string{"web/01:主", "失败(exit 7)", "exit status 7", "line2", "部署脚本"} {
+	for _, want := range []string{"web/01:主", "失败(exit 7)", "exit status 7", "line2", "部署命令"} {
 		if !strings.Contains(content, want) {
 			t.Errorf("日志缺少 %q: %s", want, content)
 		}
 	}
 }
 
-func TestStepScriptContent(t *testing.T) {
+func TestStepCommandContent(t *testing.T) {
 	// command 优先
-	content, err := StepScriptContent(ExecStep{Command: "echo hi", Script: "echo no"})
+	content, err := StepCommandContent(ExecStep{Command: "echo hi", Script: "echo no"})
 	if err != nil || content != "echo hi" {
 		t.Errorf("command 应优先: %q err=%v", content, err)
 	}
 	// 内嵌 script
-	content, err = StepScriptContent(ExecStep{Script: "echo inline\n"})
+	content, err = StepCommandContent(ExecStep{Script: "echo inline\n"})
 	if err != nil || content != "echo inline\n" {
 		t.Errorf("内嵌脚本内容错误: %q err=%v", content, err)
 	}
@@ -219,12 +219,12 @@ func TestStepScriptContent(t *testing.T) {
 	if err := os.WriteFile(path, []byte("echo from-file\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	content, err = StepScriptContent(ExecStep{ScriptPath: path})
+	content, err = StepCommandContent(ExecStep{ScriptPath: path})
 	if err != nil || content != "echo from-file\n" {
 		t.Errorf("文件脚本内容错误: %q err=%v", content, err)
 	}
 	// 文件不存在 -> 报错
-	content, err = StepScriptContent(ExecStep{ScriptPath: filepath.Join(dir, "not-exist.sh")})
+	content, err = StepCommandContent(ExecStep{ScriptPath: filepath.Join(dir, "not-exist.sh")})
 	if err == nil {
 		t.Errorf("文件不存在应报错")
 	}
@@ -232,20 +232,23 @@ func TestStepScriptContent(t *testing.T) {
 
 func TestStepRunModeAndOnError(t *testing.T) {
 	// 默认值
-	if got := StepRunMode(ExecStep{Target: "local"}); got != "once" {
-		t.Errorf("local 默认 once: %q", got)
+	if got := StepRunMode(ExecStep{Type: "command", Target: "local"}); got != "once" {
+		t.Errorf("command local 默认 once: %q", got)
 	}
-	if got := StepRunMode(ExecStep{Target: "remote"}); got != "always" {
-		t.Errorf("remote 默认 always: %q", got)
+	if got := StepRunMode(ExecStep{Type: "command", Target: "remote"}); got != "always" {
+		t.Errorf("command remote 默认 always: %q", got)
 	}
-	if got := StepRunMode(ExecStep{}); got != "always" {
+	if got := StepRunMode(ExecStep{Type: "command"}); got != "always" {
 		t.Errorf("未配置 target 默认 remote/always: %q", got)
+	}
+	if got := StepRunMode(ExecStep{Type: "files", Target: "push"}); got != "always" {
+		t.Errorf("files 模块固定 always: %q", got)
 	}
 	if got := StepOnError(ExecStep{}); got != "stop" {
 		t.Errorf("onError 默认 stop: %q", got)
 	}
 	// 显式配置
-	if got := StepRunMode(ExecStep{Target: "local", Run: "always"}); got != "always" {
+	if got := StepRunMode(ExecStep{Type: "command", Target: "local", Run: "always"}); got != "always" {
 		t.Errorf("显式 always: %q", got)
 	}
 	if got := StepOnError(ExecStep{OnError: "continue"}); got != "continue" {
@@ -278,49 +281,58 @@ project:
 	if _, err := writeCfg("execList:\n    - type: \"upload\"\n"); err == nil || !strings.Contains(err.Error(), "files") {
 		t.Errorf("upload 缺 files 应报错: %v", err)
 	}
-	// upload remote 非绝对路径 -> 报错
-	if _, err := writeCfg("execList:\n    - type: \"upload\"\n      files:\n        - local: \"a.sh\"\n          remote: \"opt/a.sh\"\n"); err == nil || !strings.Contains(err.Error(), "绝对路径") {
+	// files push remote 非绝对路径 -> 报错
+	if _, err := writeCfg("execList:\n    - type: \"files\"\n      target: push\n      files:\n        - local: \"a.sh\"\n          remote: \"opt/a.sh\"\n"); err == nil || !strings.Contains(err.Error(), "绝对路径") {
 		t.Errorf("relative remote 应报错: %v", err)
 	}
-	// upload remote 以 / 结尾（未精确到文件）-> 报错
-	if _, err := writeCfg("execList:\n    - type: \"upload\"\n      files:\n        - local: \"a.sh\"\n          remote: \"/opt/\"\n"); err == nil || !strings.Contains(err.Error(), "精确到文件") {
+	// files push remote 以 / 结尾（未精确到文件）-> 报错
+	if _, err := writeCfg("execList:\n    - type: \"files\"\n      target: push\n      files:\n        - local: \"a.sh\"\n          remote: \"/opt/\"\n"); err == nil || !strings.Contains(err.Error(), "精确到文件") {
 		t.Errorf("remote 以 / 结尾应报错: %v", err)
 	}
-	// upload mode 非法 -> 报错
-	if _, err := writeCfg("execList:\n    - type: \"upload\"\n      files:\n        - local: \"a.sh\"\n          remote: \"/opt/a.sh\"\n          mode: \"888\"\n"); err == nil || !strings.Contains(err.Error(), "mode") {
+	// files mode 非法 -> 报错
+	if _, err := writeCfg("execList:\n    - type: \"files\"\n      target: push\n      files:\n        - local: \"a.sh\"\n          remote: \"/opt/a.sh\"\n          mode: \"888\"\n"); err == nil || !strings.Contains(err.Error(), "mode") {
 		t.Errorf("非法 mode 应报错: %v", err)
 	}
-	// upload target 不能为 local -> 报错
-	if _, err := writeCfg("execList:\n    - type: \"upload\"\n      target: \"local\"\n      files:\n        - local: \"a.sh\"\n          remote: \"/opt/a.sh\"\n"); err == nil || !strings.Contains(err.Error(), "target") {
-		t.Errorf("upload target=local 应报错: %v", err)
+	// files target 必填（不写 -> 报错）
+	if _, err := writeCfg("execList:\n    - type: \"files\"\n      files:\n        - local: \"a.sh\"\n          remote: \"/opt/a.sh\"\n"); err == nil || !strings.Contains(err.Error(), "target") {
+		t.Errorf("files 缺 target 应报错: %v", err)
 	}
-	// script 缺内容 -> 报错
-	if _, err := writeCfg("execList:\n    - type: \"script\"\n"); err == nil || !strings.Contains(err.Error(), "command / script / scriptPath") {
-		t.Errorf("script 缺内容应报错: %v", err)
+	// files target 非法值 -> 报错
+	if _, err := writeCfg("execList:\n    - type: \"files\"\n      target: \"local\"\n      files:\n        - local: \"a.sh\"\n          remote: \"/opt/a.sh\"\n"); err == nil || !strings.Contains(err.Error(), "push / pull") {
+		t.Errorf("files target=local 应报错: %v", err)
+	}
+	// command 缺内容 -> 报错
+	if _, err := writeCfg("execList:\n    - type: \"command\"\n"); err == nil || !strings.Contains(err.Error(), "command / script / scriptPath") {
+		t.Errorf("command 缺内容应报错: %v", err)
 	}
 	// script command 与 script 同时配置 -> 报错
-	if _, err := writeCfg("execList:\n    - type: \"script\"\n      command: \"echo a\"\n      script: \"echo b\"\n"); err == nil || !strings.Contains(err.Error(), "只能配置一个") {
+	if _, err := writeCfg("execList:\n    - type: \"command\"\n      command: \"echo a\"\n      script: \"echo b\"\n"); err == nil || !strings.Contains(err.Error(), "只能配置一个") {
 		t.Errorf("command+script 同时配置应报错: %v", err)
 	}
 	// script timeout 非法 -> 报错
-	if _, err := writeCfg("execList:\n    - type: \"script\"\n      command: \"echo a\"\n      timeout: \"abc\"\n"); err == nil || !strings.Contains(err.Error(), "timeout") {
+	if _, err := writeCfg("execList:\n    - type: \"command\"\n      command: \"echo a\"\n      timeout: \"abc\"\n"); err == nil || !strings.Contains(err.Error(), "timeout") {
 		t.Errorf("非法 timeout 应报错: %v", err)
 	}
-	// script remoteWorkDir 非绝对路径 -> 报错
-	if _, err := writeCfg("execList:\n    - type: \"script\"\n      command: \"echo a\"\n      remoteWorkDir: \"opt\"\n"); err == nil || !strings.Contains(err.Error(), "remoteWorkDir") {
-		t.Errorf("relative remoteWorkDir 应报错: %v", err)
+	// command workdir（远端）非绝对路径 -> 报错
+	if _, err := writeCfg("execList:\n    - type: \"command\"\n      command: \"echo a\"\n      workdir: \"opt\"\n"); err == nil || !strings.Contains(err.Error(), "workdir") {
+		t.Errorf("remote workdir 非绝对路径应报错: %v", err)
+	}
+	// command workdir（本地）允许相对路径 -> 通过
+	if _, err := writeCfg("execList:\n    - type: \"command\"\n      target: local\n      command: \"echo a\"\n      workdir: \"opt\"\n"); err != nil {
+		t.Errorf("local workdir 相对路径不应报错: %v", err)
 	}
 	// run / onError 非法 -> 报错
-	if _, err := writeCfg("execList:\n    - type: \"script\"\n      command: \"echo a\"\n      run: \"sometimes\"\n"); err == nil || !strings.Contains(err.Error(), "run") {
+	if _, err := writeCfg("execList:\n    - type: \"command\"\n      command: \"echo a\"\n      run: \"sometimes\"\n"); err == nil || !strings.Contains(err.Error(), "run") {
 		t.Errorf("非法 run 应报错: %v", err)
 	}
-	if _, err := writeCfg("execList:\n    - type: \"script\"\n      command: \"echo a\"\n      onError: \"maybe\"\n"); err == nil || !strings.Contains(err.Error(), "onError") {
+	if _, err := writeCfg("execList:\n    - type: \"command\"\n      command: \"echo a\"\n      onError: \"maybe\"\n"); err == nil || !strings.Contains(err.Error(), "onError") {
 		t.Errorf("非法 onError 应报错: %v", err)
 	}
 	// 合法配置 -> 通过
 	cfg, err := writeCfg(`execList:
   - name: "上传"
-    type: upload
+    type: files
+    target: push
     files:
       - local: "a.sh"
         remote: "/opt/a.sh"
@@ -329,8 +341,9 @@ project:
       - local: "b.conf"
         remote: "/etc/b.conf"
   - name: "部署"
-    type: script
+    type: command
     target: remote
+    workdir: "/opt/app"
     command: "bash /opt/a.sh"
     timeout: 30s
   - name: "检查服务"
@@ -373,9 +386,9 @@ func TestEffectiveStepsDefault(t *testing.T) {
 		t.Errorf("显式空 execList 应返回空流水线: %+v", steps)
 	}
 	// 配置了 exec-list 则用配置的
-	cfg.ExecList = []ExecStep{{Type: "script", Command: "echo hi"}}
+	cfg.ExecList = []ExecStep{{Type: "command", Command: "echo hi"}}
 	steps = cfg.EffectiveSteps()
-	if len(steps) != 1 || steps[0].Type != "script" {
+	if len(steps) != 1 || steps[0].Type != "command" {
 		t.Errorf("配置 exec-list 后应使用配置的: %+v", steps)
 	}
 }

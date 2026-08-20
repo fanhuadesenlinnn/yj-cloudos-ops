@@ -4,25 +4,25 @@ CloudOS 7.0 虚拟机检查工具（Golang）
 
 按项目检查云平台上所有服务器（虚拟机 / 裸金属）：IP / MAC / 名称 / 所属项目 / root 密码 / 规格 / 磁盘大小（含多块数据盘），
 并用 IP + 密码测试 SSH 是否能正常登录；登录成功后执行 **流水线（exec-list）**：可自定义
-上传文件/文件夹、执行本地/远端命令脚本、采集服务器运行状态、检查服务运行状态等模块，按顺序逐台执行。
+传输文件（push/pull）、执行本地/远端命令、采集服务器运行状态、检查服务运行状态等模块，按顺序逐台执行。
 结果默认显示到屏幕，可配置导出 CSV / Excel。
 
 - 纯 Go 实现，`CGO_ENABLED=0` 静态编译，**不依赖 glibc**，支持 Windows / Linux
 - 支持跳过证书校验
 - 项目按名称传入，支持**多项目**（`project.names`）与**全部项目**（`*` / `all`），同名多项目时屏幕列出供用户选择
 - **流水线 exec-list 是唯一的执行模型**：登录成功的每台服务器按顺序执行配置的步骤模块，支持
-  - `upload` 上传模块：传输本地**文件/文件夹**到远端指定位置（远端精确到文件、自动建目录、可选覆盖、设权限）
-  - `script` 脚本模块：`target: local` 在本机执行命令/脚本（可只跑一次或每台都跑），`target: remote` 在远端经 SSH 执行
+  - `files` 传输模块：`target: push`（本机→远端）/ `pull`（远端→本机），支持文件/文件夹，覆盖/建目录/权限可配
+  - `command` 命令模块：`target: local`（本机）或 `remote`（远端），可先 `workdir` 进入目录再执行命令/脚本
   - `services` 服务检查模块：检查 sshd/docker 等服务运行状态
   - `status` 状态采集模块：采集 OS/内核/负载/CPU/内存/磁盘
   - 步骤按配置顺序执行，`onError: stop`（缺省）失败即终止后续步骤 / `continue` 失败后继续
   - 不配置 exec-list 时使用默认流水线：`status -> services`（保持工具原有检查能力）；配置 `execList: []` 则只测 SSH 连通性，不执行任何步骤
 - 服务器运行状态：CPU / 内存 / 磁盘使用率、负载、运行时长、OS、内核，屏幕展示摘要，Excel 单独 Sheet 展示明细
 - 服务运行状态：检查服务（如 sshd），屏幕展示 `服务名:运行中/停止/异常`，Excel 单独 Sheet 明细
-- 脚本执行（远端）：脚本内容通过 stdin 以 `bash -s` 执行，带超时控制；结果分类为
+- 命令执行（远端）：内容通过 stdin 以 `bash -s` 执行，带超时控制；结果分类为
   成功 / 失败(exit N) / 超时 / 会话中断(疑似关机/重启)，失败时 stderr 自动回显输出尾部；
   屏幕展示摘要，Excel「流水线执行结果」Sheet 存完整输出与退出码，可配置 `output.scriptDir` 按机器落盘完整输出
-- 文件上传：通过 SFTP 传输，同名文件默认跳过、可配置 `overwrite` 覆盖替换；上传失败时（onError=stop）
+- 文件传输：通过 SFTP，同名文件默认跳过、可配置 `overwrite` 覆盖替换；传输失败时（onError=stop）
   该台后续步骤不执行（避免误跑旧文件）
 - 导出文件路径留空则不导出
 
@@ -63,9 +63,9 @@ git push origin v1.0.0
 | `project.name` / `project.names` | 虚拟机所属项目名称（names 支持多个；填 `*` 或 `all` 检查全部项目） |
 | `ssh.useIp` | `internal` / `eip` / `internal-then-eip` |
 | `ssh.services` | 未配置 exec-list 时默认流水线 services 步骤检查的服务名（留空默认 sshd） |
-| `execList` | **流水线步骤列表**（唯一执行模型）。**不配置**→默认流水线 status→services；**`execList: []`**→空流水线，只测 SSH 连通性；配置步骤则完全按步骤执行。每步包含模块类型、目标、运行方式与失败策略，见下 |
+| `execList` | **流水线步骤列表**（唯一执行模型）。**不配置**→默认流水线 status→services；**`execList: []`**→空流水线，只测 SSH 连通性；配置步骤则完全按步骤执行。每步包含模块类型、方向/位置、运行方式与失败策略，见下 |
 | `output.csvPath` / `output.excelPath` | 留空则不导出；Excel 含「虚拟机清单」「服务器运行状态」「服务运行状态」「流水线执行结果」四个 Sheet |
-| `output.scriptDir` | script 步骤完整输出按机器落盘目录（留空不落盘）；保存为 `scriptDir/<运行时间戳>/<机器名>_<内网IP>_<步骤名>.log` |
+| `output.scriptDir` | command 步骤完整输出按机器落盘目录（留空不落盘）；保存为 `scriptDir/<运行时间戳>/<机器名>_<内网IP>_<步骤名>.log` |
 | `raw.dir` | 接口原始返回数据保存目录，留空则不保存；保存为 `raw.dir/<运行时间戳>/<Action>[_<实例ID>][_p<页码>].json`，**可能含密码等敏感信息** |
 
 ### 流水线 exec-list
@@ -81,41 +81,54 @@ git push origin v1.0.0
 | 字段 | 取值 | 说明 |
 |---|---|---|
 | `name` | 任意字符串 | 步骤名，展示/结果表/落盘文件名用；缺省自动生成 step1/step2... |
-| `type` | `upload` / `script` / `services` / `status` | 模块类型 |
-| `target` | `local` / `remote` | 执行位置；upload/services/status 固定 remote，script 可配置（缺省 remote） |
-| `run` | `once` / `always` | `once`=本地步骤只跑一次（缺省）；`always`=每台服务器都跑；仅 target=local 有意义 |
+| `type` | `files` / `command` / `services` / `status` | 模块类型 |
+| `target` | files: **`push`/`pull`（必填）**；command: `local`/`remote`（缺省 remote） | files 为传输方向；command 为执行位置；services/status 固定 remote |
+| `run` | `once` / `always` | `once`=本地步骤只跑一次（缺省）；`always`=每台服务器都跑；仅 command target=local 有意义 |
 | `onError` | `stop` / `continue` | `stop`=失败终止后续步骤（缺省）；`continue`=失败后继续下一步 |
 
 **模块类型：**
 
-- `upload`（上传文件/文件夹，target 固定 remote）
+- `files`（文件传输，target 必填 push / pull）
   ```yaml
-  - name: "上传安装包"
-    type: upload
-    overwrite: false       # 步骤级默认覆盖同名文件；缺省 false=已存在则跳过（安全）
-    mkdirs: true           # 远端父目录不存在时自动创建，缺省 true
+  # push：本机 -> 远端（分发/部署）
+  - name: "分发安装包"
+    type: files
+    target: push
+    overwrite: false       # 步骤级默认覆盖目标端同名文件；缺省 false=已存在则跳过（安全）
+    mkdirs: true           # 目标端父目录不存在时自动创建，缺省 true
     files:
-      - local: "dist/app.tar.gz"         # 本地文件
-        remote: "/opt/myapp/app.tar.gz"  # 远端精确文件路径（绝对路径，不能以 / 结尾）
-        mode: "0755"                     # 远端权限（八进制），默认 0644
+      - local: "dist/app.tar.gz"         # 本机源（文件/文件夹）
+        remote: "/opt/myapp/app.tar.gz"  # 远端目标（绝对路径，不能以 / 结尾）
+        mode: "0755"                     # 目标端权限（八进制），默认 0644
         overwrite: true                  # 单文件覆盖开关，优先于步骤级
-      - local: "configs/"                # 本地文件夹：递归传输，保持目录结构
+      - local: "configs/"                # 本机文件夹：递归传输，保持目录结构
         remote: "/opt/myapp/configs"     # 文件夹时远端为目标目录，每文件映射为 目录/<相对路径>
+
+  # pull：远端 -> 本机（收集日志/配置）
+  - name: "收集日志"
+    type: files
+    target: pull
+    files:
+      - remote: "/var/log/app/"          # 远端源（文件夹：递归拉取保持结构）
+        local: "logs/app/"               # 本机目标目录
+      - remote: "/etc/app.conf"          # 单个文件
+        local: "logs/app.conf"
   ```
-- `script`（执行命令/脚本，target 支持 local / remote）
+- `command`（先 cd 到 workdir 再执行命令/脚本，target 支持 local / remote）
   ```yaml
   - name: "本地构建"                       # target=local：在本机执行（只跑一次或每台都跑）
-    type: script
+    type: command
     target: local
     run: once
+    workdir: "/home/ci/app"               # 可选：先进入该目录（本地执行）
     command: "go build -o dist/app ."     # 单行命令；或 script: 内嵌多行 / scriptPath: 本地脚本文件（三选一）
     timeout: 120s
 
   - name: "远端部署"                       # target=remote：在每台服务器经 SSH 执行
-    type: script
+    type: command
     target: remote
+    workdir: "/opt/app"                   # 可选：执行前先 cd（远端要求绝对路径）
     scriptPath: "scripts/deploy.sh"       # 内容走 stdin 传远端 bash -s，无转义/注入问题
-    remoteWorkDir: "/opt/myapp"           # 执行前先 cd 到该目录（配合 upload 使用）
     timeout: 60s
   ```
 - `services`（检查服务运行状态，target 固定 remote）
@@ -139,7 +152,7 @@ git push origin v1.0.0
   远端/always 步骤的失败（onError=stop）只终止**该台机器**的后续步骤。
 - 被终止而未能执行的步骤标记「未执行(上游失败)」，屏幕/Excel 可见失败链。
 - 登录失败的机器不执行任何远端步骤（与登录结果无关的本地 once 步骤仍正常执行）。
-- `script` 步骤结果按 State 分类：`success` / `fail`(收到退出码，含被信号杀如 kill -9 → 128+N) /
+- `command` 步骤结果按 State 分类：`success` / `fail`(收到退出码，含被信号杀如 kill -9 → 128+N) /
   `timeout` / `interrupted`(未收到退出码或连接断开，典型如脚本里执行了 `init 0`/`reboot`) / `error`(未执行)。
 - 失败/超时/会话中断时 stderr 自动回显该台状态、原因与输出尾部（最后 20 行）；单步输出上限 100KB，超出截断保留末尾。
 
@@ -163,28 +176,29 @@ git push origin v1.0.0
   HMAC key 为 `Secret+"&"`，Base64 后作为 `Signature`。
 - 项目支持：`project.names` 多项目（可含 `*`/`all` 检查全部）；优先 GetProjectList 全量匹配，
   未返回时从云硬盘数据 projectName 反查，仍找不到则报错并列出可识别项目。
-- 流水线：`execList` 是唯一的执行模型。阶段一在并发前串行执行 `target=local && run=once` 的步骤（只跑一次）；
-  阶段二在 worker 池内对每台登录成功的服务器按顺序执行其余步骤。每步独立记录 名称/类型/目标/状态/退出码/输出/耗时，
+- 流水线：`execList` 是唯一的执行模型。阶段一在并发前串行执行 `type=command && target=local && run=once` 的步骤（只跑一次）；
+  阶段二在 worker 池内对每台登录成功的服务器按顺序执行其余步骤。每步独立记录 名称/类型/方向(位置)/状态/退出码/输出/耗时，
   屏幕「流水线」列展示每步摘要（如 `1✓ 2✗ 3✓`），Excel「流水线执行结果」Sheet 每台每步一行存完整明细。
 - 服务器运行状态：status 步骤经 SSH 执行 `uname`/`uptime`/`top`/`free`/`df` 采集 OS、内核、运行时长、
   负载、CPU/内存/磁盘使用率，屏幕展示摘要，Excel「服务器运行状态」Sheet 展示明细。
 - 服务运行状态：services 步骤检查配置的服务（systemctl 优先，兼容 SysV service），
   屏幕展示 `服务名:运行中/停止/异常/不存在`，Excel「服务运行状态」Sheet 每台虚拟机每个服务一行。
-- 脚本执行（remote）：内容通过 SSH channel 的 stdin 传给远端 `bash -s`（不经 shell 拼接，无转义/注入问题），
-  带步骤级超时（`timeout`，默认 60s，超时关闭会话强制中断）。结果按 State 分类：
-  `success` / `fail` / `timeout` / `interrupted`（未收到退出码或连接断开，如脚本执行了 `init 0`/`reboot`——
+- 命令执行（remote）：内容通过 SSH channel 的 stdin 传给远端 `bash -s`（不经 shell 拼接，无转义/注入问题），
+  配置 `workdir` 时先 `cd '<dir>' && bash -s`（单引号转义防注入）；带步骤级超时（`timeout`，默认 60s，超时关闭会话强制中断）。
+  结果按 State 分类：`success` / `fail` / `timeout` / `interrupted`（未收到退出码或连接断开，如脚本执行了 `init 0`/`reboot`——
   命令可能已下发、机器正在关机，故单独标记为"会话中断"而非"失败"） / `error`（未执行）。
   失败/超时/会话中断时 stderr 自动回显该台状态、原因与输出尾部（最后 20 行）；单步输出上限 100KB，超出截断保留末尾。
   可配置 `output.scriptDir` 按机器落盘。以上状态均**不影响** SSH 登录结果标记。
-- 脚本执行（local）：内容经 `sh -s`（Unix，stdin 传入）/ `cmd /C`（Windows）在本机执行，
-  同样带超时与退出码，支持 `run: once` 只跑一次或 `run: always` 每台机器各跑一次。
-- 文件上传：upload 步骤通过 SFTP（`github.com/pkg/sftp`，纯 Go）传输。
-  每条规则 `local -> remote`（remote 必须是远端绝对路径且**精确到文件**，不能以 / 结尾）；
-  本地文件不存在或本地为**文件夹**时自动递归展开（保持相对目录结构，每个文件精确映射到 `remote/<相对路径>`）；
-  远端同名文件已存在时默认**跳过**（安全，不误覆盖），单条 `overwrite: true` 或步骤级 `overwrite: true` 才覆盖替换；
-  `mkdirs` 控制父目录自动创建（默认开）；`mode` 设置远端权限（八进制，默认 0644）。
-  上传失败（onError=stop）时该台后续步骤不执行，避免误跑远端旧文件。屏幕「流水线」列展示摘要，
-  失败/跳过会在 stderr 回显现场。
+- 命令执行（local）：配置 `workdir` 时先进入该目录（`cmd.Dir`），内容经 `sh -s`（Unix，stdin 传入）/ `cmd /C`（Windows）执行，
+  同样带超时（超时杀掉整个进程组，防止 sleep 等子进程持有管道阻塞等待）与退出码，支持 `run: once` 只跑一次或 `run: always` 每台机器各跑一次。
+- 文件传输：files 步骤通过 SFTP（`github.com/pkg/sftp`，纯 Go）双向传输。
+  - `push`（本机 → 远端）：`local` 为本机源（文件/文件夹），`remote` 为远端目标（绝对路径且**精确到文件**，不能以 / 结尾）；
+    本地为文件夹时递归展开（保持相对目录结构，每个文件精确映射到 `remote/<相对路径>`）。
+  - `pull`（远端 → 本机）：`remote` 为远端源（文件/文件夹，SFTP 递归列出后拉取），`local` 为本机目标；
+    远端为文件夹时递归拉取，每个文件映射到 `local/<相对路径>`。
+  - 目标端同名文件已存在时默认**跳过**（安全，不误覆盖），单条 `overwrite: true` 或步骤级 `overwrite: true` 才覆盖替换；
+    `mkdirs` 控制目标端父目录自动创建（默认开）；`mode` 设置目标端权限（八进制，默认 0644）。
+  - 传输失败（onError=stop）时该台后续步骤不执行，避免误跑远端旧文件。屏幕「流水线」列展示摘要，失败/跳过会在 stderr 回显现场。
 - 调用接口：
   - `GetProjectList`（/project）按名称解析项目
   - `DescribeEcs`（/compute/ecs/instances）分页拉全量主机，客户端按 projectId 过滤（该接口无项目筛选参数）
@@ -199,11 +213,11 @@ git push origin v1.0.0
 
 ## 注意事项
 
-- 脚本执行：remote 脚本以 root 身份在每台服务器执行，等同于远端任意代码执行能力，请勿在脚本/配置中写入密码等敏感信息；
+- 命令执行：remote 命令以 root 身份在每台服务器执行，等同于远端任意代码执行能力，请勿在命令/脚本中写入密码等敏感信息；
   脚本请用 LF 换行（Windows 编辑器的 CRLF 会导致 `bash -s` 报错）；远端需有 bash（本工具状态采集本身也依赖 bash）。
-- 脚本里执行 `init 0` / `reboot` / `shutdown` 等命令会掐断 SSH 会话：拿不到退出码、输出可能不完整，
+- 命令里执行 `init 0` / `reboot` / `shutdown` 等会掐断 SSH 会话：拿不到退出码、输出可能不完整，
   程序会标记为「会话中断(疑似关机/重启)」而非「失败」，这是正常语义，请结合机器实际状态判断；已收到的部分输出会照常保存。
-- Windows 老终端（cmd）中文输出请先执行 `chcp 65001`；本地 script 步骤在 Windows 上用 `cmd /C` 执行。
+- Windows 老终端（cmd）中文输出请先执行 `chcp 65001`；本地 command 步骤在 Windows 上用 `cmd /C` 执行。
 - 分页大小 `pagination.pageSize` 默认 100，部分平台可能有上限，接口报错时调小（如 10）。
 - 取密码/详情等按实例请求已**并发化**（`http.concurrent`，默认 10，可调大提速），并有进度提示，不再长时间无响应。
 - 项目列优先用 GetProjectList（全量拉取）补全项目名，无磁盘的项目也能显示名称而非 ID。

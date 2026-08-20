@@ -76,7 +76,7 @@ func main() {
 	// 阶段一：流水线中 target=local 且 run=once 的步骤只跑一次（如本地构建/打包），
 	// 结果供每台机器复用；某步失败且 onError=stop 则全局终止，不再执行远端步骤。
 	for i, step := range cfg.EffectiveSteps() {
-		if StepTarget(step) != "local" || StepRunMode(step) != "once" {
+		if !StepIsLocal(step) || StepRunMode(step) != "once" {
 			continue
 		}
 		fmt.Fprintf(os.Stderr, "[流水线] 本地步骤: %s\n", StepName(step, i))

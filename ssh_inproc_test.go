@@ -105,7 +105,7 @@ func serveSession(channel ssh.Channel, requests <-chan *ssh.Request, opts inProc
 				channel.CloseWrite()
 				return
 			}
-			runRemoteCommand(channel, payload.Command)
+			serveRemoteCommand(channel, payload.Command)
 			// 模拟真实 sshd：命令结束后发送 EOF 并关闭会话，
 			// 否则客户端 Wait() 会一直等 stdout/stderr 拷贝协程结束
 			channel.CloseWrite()
@@ -134,11 +134,11 @@ func serveSession(channel ssh.Channel, requests <-chan *ssh.Request, opts inProc
 	}
 }
 
-// runRemoteCommand 用 bash -c 执行命令，stdin/stdout/stderr 接到 channel，最后发送 exit-status。
+// serveRemoteCommand 用 bash -c 执行命令，stdin/stdout/stderr 接到 channel，最后发送 exit-status。
 // 注意: stdin 必须用 os.Pipe + 独立 goroutine 桥接——若直接 cmd.Stdin = channel，
 // os/exec 的 Wait() 会等待 stdin 拷贝协程结束，而客户端执行不读 stdin 的命令时
 // 从不发送 stdin 数据/EOF，会导致服务端与客户端互相死锁（真实 sshd 不 join 该拷贝，无此问题）。
-func runRemoteCommand(channel ssh.Channel, command string) {
+func serveRemoteCommand(channel ssh.Channel, command string) {
 	cmd := exec.Command("bash", "-c", command)
 	pr, pw, err := os.Pipe()
 	if err == nil {
@@ -181,15 +181,15 @@ func inProcSSHCfg(addr string) *Config {
 func boolPtr(b bool) *bool { return &b }
 
 // scriptStep 便捷构造 script 步骤
-func scriptStep(target, content string) ExecStep {
-	return ExecStep{Name: "脚本", Type: "script", Target: target, Script: content, Timeout: "5s"}
+func commandStep(target, content string) ExecStep {
+	return ExecStep{Name: "命令", Type: "command", Target: target, Script: content, Timeout: "5s"}
 }
 
 // 脚本内容通过 stdin 传给远端 bash -s，正常输出与退出码
 func TestScriptExecInProc(t *testing.T) {
 	addr := startInProcSSHServer(t, "Test@12345")
 	cfg := inProcSSHCfg(addr)
-	cfg.ExecList = []ExecStep{scriptStep("remote", "echo hello-from-script; echo '含 中文 和 \"引号\" $符号'")}
+	cfg.ExecList = []ExecStep{commandStep("remote", "echo hello-from-script; echo '含 中文 和 \"引号\" $符号'")}
 
 	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
 	if err != nil {
@@ -215,7 +215,7 @@ func TestScriptExecInProc(t *testing.T) {
 func TestScriptExecNonZeroExitInProc(t *testing.T) {
 	addr := startInProcSSHServer(t, "Test@12345")
 	cfg := inProcSSHCfg(addr)
-	cfg.ExecList = []ExecStep{scriptStep("remote", "echo before-fail; exit 42")}
+	cfg.ExecList = []ExecStep{commandStep("remote", "echo before-fail; exit 42")}
 
 	result, _, _, steps := testOne(cfg, &VM{IP: "127.0.0.1", Password: "Test@12345"}, nil, false)
 	if !strings.HasPrefix(result, "✓") {
@@ -231,7 +231,7 @@ func TestScriptExecNonZeroExitInProc(t *testing.T) {
 func TestScriptExecInterruptedInProc(t *testing.T) {
 	addr := startInProcSSHServerOpts(t, "Test@12345", inProcOpts{AbortBashS: true})
 	cfg := inProcSSHCfg(addr)
-	cfg.ExecList = []ExecStep{scriptStep("remote", "echo before-interrupt")}
+	cfg.ExecList = []ExecStep{commandStep("remote", "echo before-interrupt")}
 
 	result, _, _, steps := testOne(cfg, &VM{IP: "127.0.0.1", Password: "Test@12345"}, nil, false)
 	if !strings.HasPrefix(result, "✓") {
@@ -253,7 +253,7 @@ func TestScriptExecInterruptedInProc(t *testing.T) {
 func TestScriptExecTimeoutInProc(t *testing.T) {
 	addr := startInProcSSHServer(t, "Test@12345")
 	cfg := inProcSSHCfg(addr)
-	step := scriptStep("remote", "sleep 30; echo never")
+	step := commandStep("remote", "sleep 30; echo never")
 	step.Timeout = "1s"
 	cfg.ExecList = []ExecStep{step}
 
@@ -278,7 +278,7 @@ func TestScriptExecTimeoutInProc(t *testing.T) {
 func TestScriptNotRunOnAuthFailInProc(t *testing.T) {
 	addr := startInProcSSHServer(t, "Test@12345")
 	cfg := inProcSSHCfg(addr)
-	cfg.ExecList = []ExecStep{scriptStep("remote", "echo never-runs")}
+	cfg.ExecList = []ExecStep{commandStep("remote", "echo never-runs")}
 
 	_, _, steps, err := trySSH(cfg, "127.0.0.1", "wrong-password", nil, false)
 	if err == nil {
@@ -294,8 +294,8 @@ func TestPipelineStopOnErrorInProc(t *testing.T) {
 	addr := startInProcSSHServer(t, "Test@12345")
 	cfg := inProcSSHCfg(addr)
 	cfg.ExecList = []ExecStep{
-		scriptStep("remote", "echo fail-first; exit 3"),
-		scriptStep("remote", "echo should-not-run"),
+		commandStep("remote", "echo fail-first; exit 3"),
+		commandStep("remote", "echo should-not-run"),
 	}
 
 	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
@@ -315,8 +315,8 @@ func TestPipelineContinueOnErrorInProc(t *testing.T) {
 	addr := startInProcSSHServer(t, "Test@12345")
 	cfg := inProcSSHCfg(addr)
 	cfg.ExecList = []ExecStep{
-		{Name: "失败步骤", Type: "script", Target: "remote", Script: "exit 9", Timeout: "5s", OnError: "continue"},
-		scriptStep("remote", "echo still-runs"),
+		{Name: "失败步骤", Type: "command", Target: "remote", Script: "exit 9", Timeout: "5s", OnError: "continue"},
+		commandStep("remote", "echo still-runs"),
 	}
 
 	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
@@ -336,8 +336,8 @@ func TestPipelineLocalOnceInProc(t *testing.T) {
 	addr := startInProcSSHServer(t, "Test@12345")
 	cfg := inProcSSHCfg(addr)
 	cfg.ExecList = []ExecStep{
-		{Name: "本地准备", Type: "script", Target: "local", Run: "once", Command: "echo local-once", Timeout: "5s"},
-		scriptStep("remote", "echo remote-step"),
+		{Name: "本地准备", Type: "command", Target: "local", Run: "once", Command: "echo local-once", Timeout: "5s"},
+		commandStep("remote", "echo remote-step"),
 	}
 
 	onceResults, stopped := runPipelineOnce(cfg)
@@ -371,8 +371,8 @@ func TestPipelineLocalOnceFailStopsGlobal(t *testing.T) {
 	addr := startInProcSSHServer(t, "Test@12345")
 	cfg := inProcSSHCfg(addr)
 	cfg.ExecList = []ExecStep{
-		{Name: "本地构建", Type: "script", Target: "local", Run: "once", Command: "exit 5", Timeout: "5s"},
-		scriptStep("remote", "echo never"),
+		{Name: "本地构建", Type: "command", Target: "local", Run: "once", Command: "exit 5", Timeout: "5s"},
+		commandStep("remote", "echo never"),
 	}
 
 	onceResults, stopped := runPipelineOnce(cfg)
@@ -430,18 +430,18 @@ func TestDefaultPipelineInProc(t *testing.T) {
 // 本地脚本：成功/失败/超时
 func TestLocalScriptInProc(t *testing.T) {
 	// 成功
-	res := runLocalScript(ExecStep{Name: "本地", Type: "script", Target: "local", Command: "echo hello-local; exit 0", Timeout: "5s"}, "本地")
+	res := runLocalCommand(ExecStep{Name: "本地", Type: "command", Target: "local", Command: "echo hello-local; exit 0", Timeout: "5s"}, "本地")
 	if res.State != "success" || res.ExitCode != 0 || !strings.Contains(res.Output, "hello-local") {
 		t.Errorf("本地脚本应成功: %+v", res)
 	}
 	// 失败
-	res = runLocalScript(ExecStep{Name: "本地", Type: "script", Target: "local", Command: "echo oops; exit 7", Timeout: "5s"}, "本地")
+	res = runLocalCommand(ExecStep{Name: "本地", Type: "command", Target: "local", Command: "echo oops; exit 7", Timeout: "5s"}, "本地")
 	if res.State != "fail" || res.ExitCode != 7 {
 		t.Errorf("本地脚本应失败 exit7: %+v", res)
 	}
 	// 超时：应快速返回（进程组被杀，不会等 sleep 自然结束）
 	start := time.Now()
-	res = runLocalScript(ExecStep{Name: "本地", Type: "script", Target: "local", Command: "sleep 30", Timeout: "1s"}, "本地")
+	res = runLocalCommand(ExecStep{Name: "本地", Type: "command", Target: "local", Command: "sleep 30", Timeout: "1s"}, "本地")
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Errorf("本地脚本超时应快速返回，实际耗时: %v", elapsed)
 	}
@@ -449,7 +449,7 @@ func TestLocalScriptInProc(t *testing.T) {
 		t.Errorf("本地脚本应超时: %+v", res)
 	}
 	// 空内容
-	res = runLocalScript(ExecStep{Name: "本地", Type: "script", Target: "local"}, "本地")
+	res = runLocalCommand(ExecStep{Name: "本地", Type: "command", Target: "local"}, "本地")
 	if res.State != "error" {
 		t.Errorf("空内容应报错: %+v", res)
 	}

@@ -37,7 +37,7 @@ func TestParseFileMode(t *testing.T) {
 }
 
 func TestStepFileModeDefault(t *testing.T) {
-	step := ExecStep{Type: "upload"}
+	step := ExecStep{Type: "files", Target: "push"}
 	m, err := StepFileMode(step, StepUploadFile{})
 	if err != nil {
 		t.Fatalf("默认权限解析失败: %v", err)
@@ -94,17 +94,17 @@ func TestShellQuote(t *testing.T) {
 	}
 }
 
-func TestUploadResultLine(t *testing.T) {
-	if got := uploadResultLine(&UploadResult{State: "success", Local: "a", Remote: "/x/a", Mode: "0644"}); got != "✓ a -> /x/a (0644)" {
+func TestFilesResultLine(t *testing.T) {
+	if got := filesResultLine(&UploadResult{State: "success", Local: "a", Remote: "/x/a", Mode: "0644"}); got != "✓ a -> /x/a (0644)" {
 		t.Errorf("新建上传行错误: %q", got)
 	}
-	if got := uploadResultLine(&UploadResult{State: "success", Overwritten: true, Local: "a", Remote: "/x/a", Mode: "0644"}); got != "✓ 已覆盖 a -> /x/a (0644)" {
+	if got := filesResultLine(&UploadResult{State: "success", Overwritten: true, Local: "a", Remote: "/x/a", Mode: "0644"}); got != "✓ 已覆盖 a -> /x/a (0644)" {
 		t.Errorf("覆盖上传行错误: %q", got)
 	}
-	if got := uploadResultLine(&UploadResult{State: "skipped", Local: "a", Remote: "/x/a", Error: "已存在"}); !strings.Contains(got, "跳过") {
+	if got := filesResultLine(&UploadResult{State: "skipped", Local: "a", Remote: "/x/a", Error: "已存在"}); !strings.Contains(got, "跳过") {
 		t.Errorf("跳过行错误: %q", got)
 	}
-	if got := uploadResultLine(&UploadResult{State: "error", Local: "a", Remote: "/x/a", Error: "boom"}); !strings.Contains(got, "失败") {
+	if got := filesResultLine(&UploadResult{State: "error", Local: "a", Remote: "/x/a", Error: "boom"}); !strings.Contains(got, "失败") {
 		t.Errorf("失败行错误: %q", got)
 	}
 }
@@ -156,13 +156,13 @@ func TestExpandLocalFiles(t *testing.T) {
 func inProcUploadCfg(addr string) *Config {
 	cfg := inProcSSHCfg(addr)
 	cfg.ExecList = []ExecStep{
-		{Name: "上传", Type: "upload"},
-		{Name: "脚本", Type: "script", Target: "remote", Timeout: "5s"},
+		{Name: "上传", Type: "files", Target: "push"},
+		{Name: "命令", Type: "command", Target: "remote", Timeout: "5s"},
 	}
 	return cfg
 }
 
-// 上传到指定位置（自动创建父目录），可校验内容与权限；随后脚本在 remoteWorkDir 下执行
+// 上传到指定位置（自动创建父目录），可校验内容与权限；随后命令在 workdir 下执行
 func TestUploadInProc(t *testing.T) {
 	remoteRoot := t.TempDir()
 	addr := startInProcSSHServerOpts(t, "Test@12345", inProcOpts{SFTPDir: remoteRoot})
@@ -173,7 +173,7 @@ func TestUploadInProc(t *testing.T) {
 	remote := filepath.Join(remoteRoot, "opt/myapp/deploy.sh")
 	cfg.ExecList[0].Files = []StepUploadFile{{Local: local, Remote: remote, Mode: "0755"}}
 	cfg.ExecList[1].Script = "bash deploy.sh"
-	cfg.ExecList[1].RemoteWorkDir = filepath.Join(remoteRoot, "opt/myapp")
+	cfg.ExecList[1].Workdir = filepath.Join(remoteRoot, "opt/myapp")
 
 	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
 	if err != nil {
@@ -206,7 +206,7 @@ func TestUploadInProc(t *testing.T) {
 		t.Errorf("权限应为 0755: %v", info.Mode().Perm())
 	}
 
-	// remoteWorkDir 生效：脚本在 opt/myapp 下执行 bash deploy.sh
+	// workdir 生效：命令在 opt/myapp 下执行 bash deploy.sh
 	scr := steps[1]
 	if scr == nil || scr.State != "success" {
 		t.Fatalf("脚本应在上传目录执行成功: %+v", scr)
@@ -319,7 +319,7 @@ func TestUploadWithoutScriptInProc(t *testing.T) {
 	addr := startInProcSSHServerOpts(t, "Test@12345", inProcOpts{SFTPDir: remoteRoot})
 	cfg := inProcSSHCfg(addr)
 	cfg.ExecList = []ExecStep{
-		{Name: "上传", Type: "upload", Files: []StepUploadFile{{Local: func() string {
+		{Name: "上传", Type: "files", Target: "push", Files: []StepUploadFile{{Local: func() string {
 			p := filepath.Join(t.TempDir(), "app.conf")
 			os.WriteFile(p, []byte("key=value\n"), 0o644)
 			return p
@@ -355,7 +355,7 @@ func TestUploadFolderInProc(t *testing.T) {
 	os.WriteFile(filepath.Join(localDir, "conf", "nested", "b.json"), []byte("{}\n"), 0o644)
 
 	cfg.ExecList = []ExecStep{
-		{Name: "上传目录", Type: "upload", Files: []StepUploadFile{
+		{Name: "上传目录", Type: "files", Target: "push", Files: []StepUploadFile{
 			{Local: localDir, Remote: filepath.Join(remoteRoot, "opt/app"), Mode: "0644"},
 		}},
 	}
@@ -388,5 +388,134 @@ func TestUploadFolderInProc(t *testing.T) {
 	// 输出中不应有目录本身作为文件（“conf ->”会误匹配 “a.conf ->”，用带目录分隔符的精确前缀判断）
 	if strings.Contains(steps[0].Output, filepath.Join("dist", "conf")+" ->") || strings.Contains(steps[0].Output, filepath.Join("conf", "nested")+" ->") {
 		t.Errorf("不应把目录当文件上传: %q", steps[0].Output)
+	}
+}
+
+// ---------- pull（下载：远端 -> 本机） ----------
+
+// 单个远端文件拉回本机：内容与权限校验
+func TestPullInProc(t *testing.T) {
+	remoteRoot := t.TempDir()
+	addr := startInProcSSHServerOpts(t, "Test@12345", inProcOpts{SFTPDir: remoteRoot})
+	cfg := inProcSSHCfg(addr)
+
+	// 在“远端”放一个文件
+	remoteFile := filepath.Join(remoteRoot, "var/log/app.log")
+	os.MkdirAll(filepath.Dir(remoteFile), 0o755)
+	os.WriteFile(remoteFile, []byte("remote-log-line\n"), 0o644)
+
+	localDir := t.TempDir()
+	cfg.ExecList = []ExecStep{
+		{Name: "拉取日志", Type: "files", Target: "pull", Files: []StepUploadFile{
+			{Local: filepath.Join(localDir, "app.log"), Remote: remoteFile, Mode: "0640"},
+		}},
+	}
+
+	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
+	if err != nil {
+		t.Fatalf("trySSH 失败: %v", err)
+	}
+	if steps[0].State != "success" {
+		t.Fatalf("pull 应成功: %+v", steps[0])
+	}
+	if !strings.Contains(steps[0].Output, "->") {
+		t.Errorf("输出应含传输信息: %q", steps[0].Output)
+	}
+	data, err := os.ReadFile(filepath.Join(localDir, "app.log"))
+	if err != nil {
+		t.Fatalf("本机文件不存在: %v", err)
+	}
+	if string(data) != "remote-log-line\n" {
+		t.Errorf("本机内容错误: %q", data)
+	}
+	info, _ := os.Stat(filepath.Join(localDir, "app.log"))
+	if info.Mode().Perm().String() != "-rw-r-----" {
+		t.Errorf("权限应为 0640: %v", info.Mode().Perm())
+	}
+}
+
+// 远端文件夹递归拉取：保持目录结构
+func TestPullFolderInProc(t *testing.T) {
+	remoteRoot := t.TempDir()
+	addr := startInProcSSHServerOpts(t, "Test@12345", inProcOpts{SFTPDir: remoteRoot})
+	cfg := inProcSSHCfg(addr)
+
+	// 在“远端”放一个文件夹
+	remoteDir := filepath.Join(remoteRoot, "var/log/app")
+	os.MkdirAll(filepath.Join(remoteDir, "sub"), 0o755)
+	os.WriteFile(filepath.Join(remoteDir, "a.log"), []byte("aaa\n"), 0o644)
+	os.WriteFile(filepath.Join(remoteDir, "sub", "b.log"), []byte("bbb\n"), 0o644)
+
+	localDir := t.TempDir()
+	cfg.ExecList = []ExecStep{
+		{Name: "拉取目录", Type: "files", Target: "pull", Files: []StepUploadFile{
+			{Local: localDir, Remote: remoteDir},
+		}},
+	}
+
+	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
+	if err != nil {
+		t.Fatalf("trySSH 失败: %v", err)
+	}
+	if steps[0].State != "success" {
+		t.Fatalf("文件夹 pull 应成功: %+v", steps[0])
+	}
+	for _, want := range []string{"a.log", filepath.Join("sub", "b.log")} {
+		p := filepath.Join(localDir, want)
+		data, err := os.ReadFile(p)
+		if err != nil {
+			t.Errorf("本机文件缺失 %s: %v", want, err)
+			continue
+		}
+		if len(data) == 0 {
+			t.Errorf("本机文件为空: %s", want)
+		}
+	}
+}
+
+// pull 覆盖语义：本机已存在默认跳过；overwrite=true 覆盖
+func TestPullOverwriteInProc(t *testing.T) {
+	remoteRoot := t.TempDir()
+	addr := startInProcSSHServerOpts(t, "Test@12345", inProcOpts{SFTPDir: remoteRoot})
+	cfg := inProcSSHCfg(addr)
+
+	remoteFile := filepath.Join(remoteRoot, "etc/app.conf")
+	os.MkdirAll(filepath.Dir(remoteFile), 0o755)
+	os.WriteFile(remoteFile, []byte("REMOTE-CONTENT\n"), 0o644)
+
+	localDir := t.TempDir()
+	localFile := filepath.Join(localDir, "app.conf")
+	os.WriteFile(localFile, []byte("LOCAL-OLD\n"), 0o644)
+
+	// 1. 默认不覆盖：本机已有则跳过
+	cfg.ExecList = []ExecStep{
+		{Name: "拉取", Type: "files", Target: "pull", Files: []StepUploadFile{
+			{Local: localFile, Remote: remoteFile},
+		}},
+	}
+	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
+	if err != nil {
+		t.Fatalf("trySSH 失败: %v", err)
+	}
+	if steps[0].State != "success" || !strings.Contains(steps[0].Output, "跳过") {
+		t.Fatalf("本机已存在且未覆盖应跳过: %+v", steps[0])
+	}
+	data, _ := os.ReadFile(localFile)
+	if string(data) != "LOCAL-OLD\n" {
+		t.Errorf("跳过时本机内容不应被改: %q", data)
+	}
+
+	// 2. overwrite=true：覆盖
+	cfg.ExecList[0].Files = []StepUploadFile{{Local: localFile, Remote: remoteFile, Overwrite: boolPtr(true)}}
+	_, _, steps, err = trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
+	if err != nil {
+		t.Fatalf("trySSH 失败: %v", err)
+	}
+	if steps[0].State != "success" || !strings.Contains(steps[0].Output, "已覆盖") {
+		t.Fatalf("overwrite=true 应覆盖: %+v", steps[0])
+	}
+	data, _ = os.ReadFile(localFile)
+	if string(data) != "REMOTE-CONTENT\n" {
+		t.Errorf("覆盖后本机内容应更新: %q", data)
 	}
 }

@@ -59,7 +59,7 @@ func runSSHTests(cfg *Config, vms []*VM, onceResults []*ExecStepResult, globalSt
 					if !stepOK(s) && s.State != "skipped" {
 						printStepFailure(vm, s) // 失败/超时/会话中断：stderr 回显现场
 					}
-					if scriptDir != "" && s.Type == "script" {
+					if scriptDir != "" && s.Type == "command" {
 						writeScriptLog(scriptDir, vm, s)
 					}
 				}
@@ -174,7 +174,7 @@ func runPipelineOnce(cfg *Config) ([]*ExecStepResult, bool) {
 	steps := cfg.EffectiveSteps()
 	results := make([]*ExecStepResult, len(steps))
 	for i, step := range steps {
-		if StepTarget(step) != "local" || StepRunMode(step) != "once" {
+		if !StepIsLocal(step) || StepRunMode(step) != "once" {
 			continue
 		}
 		res := execStepLocal(step, i)
@@ -200,7 +200,7 @@ func runPipeline(cfg *Config, client *ssh.Client, onceResults []*ExecStepResult,
 		name := StepName(step, i)
 		if stopped {
 			// 全局/上游终止：本地 once 步骤已执行过则复用其结果（如实展示失败现场），其余步骤标记未执行
-			if StepTarget(step) == "local" && StepRunMode(step) == "once" && i < len(onceResults) && onceResults[i] != nil {
+			if StepIsLocal(step) && StepRunMode(step) == "once" && i < len(onceResults) && onceResults[i] != nil {
 				results = append(results, onceResults[i])
 			} else {
 				results = append(results, skippedStepResult(step, name, "上游步骤失败，流水线已终止，本步骤未执行"))
@@ -208,7 +208,7 @@ func runPipeline(cfg *Config, client *ssh.Client, onceResults []*ExecStepResult,
 			continue
 		}
 		// 本地 once 步骤：复用阶段一结果（按步骤下标对齐）
-		if StepTarget(step) == "local" && StepRunMode(step) == "once" {
+		if StepIsLocal(step) && StepRunMode(step) == "once" {
 			if i < len(onceResults) && onceResults[i] != nil {
 				results = append(results, onceResults[i])
 				if !stepOK(onceResults[i]) && StepOnError(step) == "stop" {
@@ -227,13 +227,13 @@ func runPipeline(cfg *Config, client *ssh.Client, onceResults []*ExecStepResult,
 
 		var res *ExecStepResult
 		switch step.Type {
-		case "upload":
-			res = execUploadStep(client, step, name)
-		case "script":
-			if StepTarget(step) == "local" {
-				res = runLocalScript(step, name)
+		case "files":
+			res = execFilesStep(client, step, name)
+		case "command":
+			if StepIsLocal(step) {
+				res = runLocalCommand(step, name)
 			} else {
-				res = runRemoteScript(client, step, name)
+				res = runRemoteCommand(client, step, name)
 			}
 		case "services":
 			var svcs []ServiceStatus
@@ -259,9 +259,9 @@ func runPipeline(cfg *Config, client *ssh.Client, onceResults []*ExecStepResult,
 	return status, services, results
 }
 
-// execStepLocal 在本机执行单个步骤（当前仅 script 支持 target=local）
+// execStepLocal 在本机执行单个步骤（当前仅 command 模块支持 target=local）
 func execStepLocal(step ExecStep, idx int) *ExecStepResult {
-	return runLocalScript(step, StepName(step, idx))
+	return runLocalCommand(step, StepName(step, idx))
 }
 
 // stepOK 步骤结果是否成功（success 或跳过 skipped 均视为不阻断流水线）
@@ -280,14 +280,14 @@ func stepDuration(start time.Time) string {
 	return time.Since(start).Truncate(time.Millisecond).String()
 }
 
-// ---------- upload 模块（SFTP 传输文件/文件夹，远端精确到文件） ----------
+// ---------- files 模块（SFTP 双向传输：push 本机->远端 / pull 远端->本机） ----------
 
-// execUploadStep 通过 SFTP 上传步骤配置的所有文件/文件夹，返回汇总结果。
-// local 为文件时 remote 是精确远端文件路径；local 为文件夹时递归展开，
-// 每个文件映射为 remote/<相对路径>（保持目录结构，远端目标精确到文件）。
-func execUploadStep(client *ssh.Client, step ExecStep, name string) *ExecStepResult {
+// execFilesStep 执行 files 步骤：按 target 方向（push/pull，校验已强制必填）传输所有规则。
+// push: 本机文件/文件夹 -> 远端（精确到文件）；pull: 远端文件/文件夹 -> 本机（保持目录结构）。
+func execFilesStep(client *ssh.Client, step ExecStep, name string) *ExecStepResult {
 	start := time.Now()
-	res := &ExecStepResult{Name: name, Type: "upload", Target: "remote", ExitCode: -1}
+	direction := StepTarget(step) // push / pull
+	res := &ExecStepResult{Name: name, Type: "files", Target: direction, ExitCode: -1}
 
 	sftpClient, err := sftp.NewClient(client)
 	if err != nil {
@@ -301,6 +301,23 @@ func execUploadStep(client *ssh.Client, step ExecStep, name string) *ExecStepRes
 	var lines []string
 	fail := 0
 	for _, f := range step.Files {
+		if direction == "pull" {
+			// pull：远端 -> 本机
+			results, err := pullRule(sftpClient, step, f)
+			if err != nil {
+				fail++
+				lines = append(lines, "失败: "+f.Remote+" -> "+f.Local+"（"+err.Error()+"）")
+				continue
+			}
+			for _, one := range results {
+				lines = append(lines, filesResultLine(one))
+				if one.State == "error" {
+					fail++
+				}
+			}
+			continue
+		}
+		// push：本机 -> 远端
 		pairs, err := expandLocalFiles(f)
 		if err != nil {
 			fail++
@@ -308,9 +325,9 @@ func execUploadStep(client *ssh.Client, step ExecStep, name string) *ExecStepRes
 			continue
 		}
 		for _, p := range pairs {
-			u := uploadOne(sftpClient, step, f, p.local, p.remote)
-			lines = append(lines, uploadResultLine(u))
-			if u.State == "error" {
+			one := pushOne(sftpClient, step, f, p.local, p.remote)
+			lines = append(lines, filesResultLine(one))
+			if one.State == "error" {
 				fail++
 			}
 		}
@@ -319,10 +336,129 @@ func execUploadStep(client *ssh.Client, step ExecStep, name string) *ExecStepRes
 	res.Duration = stepDuration(start)
 	if fail > 0 {
 		res.State = "error"
-		res.Error = fmt.Sprintf("%d 个文件上传失败", fail)
+		res.Error = fmt.Sprintf("%d 个文件传输失败", fail)
 	} else {
 		res.State = "success"
 	}
+	return res
+}
+
+// pullRule 按 pull 方向展开并拉取一条规则：remote 为远端源（文件/文件夹），拉回 local（本机目标）。
+// 远端为文件夹时递归拉取，每个文件映射到 local/<相对路径>（保持目录结构）。
+func pullRule(sc *sftp.Client, step ExecStep, f StepUploadFile) ([]*UploadResult, error) {
+	info, err := sc.Stat(f.Remote)
+	if err != nil {
+		return nil, fmt.Errorf("远端路径不存在: %w", err)
+	}
+	if !info.IsDir() {
+		return []*UploadResult{pullOne(sc, step, f, f.Remote, f.Local)}, nil
+	}
+	files, err := walkRemoteFiles(sc, f.Remote)
+	if err != nil {
+		return nil, err
+	}
+	base := strings.TrimSuffix(path.Clean(f.Remote), "/")
+	var results []*UploadResult
+	for _, rf := range files {
+		rel := strings.TrimPrefix(strings.TrimPrefix(rf, base), "/")
+		if rel == "" {
+			rel = path.Base(rf)
+		}
+		results = append(results, pullOne(sc, step, f, rf, filepath.Join(f.Local, filepath.FromSlash(rel))))
+	}
+	return results, nil
+}
+
+// walkRemoteFiles 递归列出远端目录下的所有文件路径（sftp 无 Walk，手写递归）
+func walkRemoteFiles(sc *sftp.Client, dir string) ([]string, error) {
+	entries, err := sc.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("读取远端目录 %s 失败: %w", dir, err)
+	}
+	var files []string
+	for _, e := range entries {
+		p := path.Join(dir, e.Name())
+		if e.IsDir() {
+			sub, err := walkRemoteFiles(sc, p)
+			if err != nil {
+				return nil, err
+			}
+			files = append(files, sub...)
+		} else {
+			files = append(files, p)
+		}
+	}
+	return files, nil
+}
+
+// pullOne 拉取单个远端文件到本机：本机同名已存在且未开启覆盖 -> 跳过；否则建父目录、流式写入并设权限。
+func pullOne(sc *sftp.Client, step ExecStep, f StepUploadFile, remotePath, localPath string) *UploadResult {
+	res := &UploadResult{Local: localPath, Remote: remotePath}
+
+	mode, err := StepFileMode(step, f)
+	if err != nil {
+		res.State = "error"
+		res.Error = err.Error()
+		return res
+	}
+	res.Mode = fmt.Sprintf("%04o", mode)
+
+	// 本机同名已存在且未开启覆盖：跳过（安全默认）
+	existed := false
+	if _, err := os.Stat(localPath); err == nil {
+		existed = true
+	}
+	if existed && !StepShouldOverwrite(step, f) {
+		res.State = "skipped"
+		res.Error = "本机已存在同名文件，未开启覆盖，已跳过"
+		return res
+	}
+
+	remote, err := sc.Open(remotePath)
+	if err != nil {
+		res.State = "error"
+		res.Error = "打开远端文件失败: " + err.Error()
+		return res
+	}
+	defer remote.Close()
+
+	// 本机父目录不存在时自动创建
+	if StepMkdirsEnabled(step) {
+		if dir := filepath.Dir(localPath); dir != "." && dir != "/" {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				res.State = "error"
+				res.Error = "创建本机目录失败: " + err.Error()
+				return res
+			}
+		}
+	}
+
+	// O_TRUNC 覆盖写入（支持二进制/大文件，io.Copy 流式传输）
+	local, err := os.OpenFile(localPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+	if err != nil {
+		res.State = "error"
+		res.Error = "打开本机文件失败: " + err.Error()
+		return res
+	}
+	if _, err := io.Copy(local, remote); err != nil {
+		local.Close()
+		res.State = "error"
+		res.Error = "写入本机文件失败: " + err.Error()
+		return res
+	}
+	if err := local.Close(); err != nil {
+		res.State = "error"
+		res.Error = "关闭本机文件失败: " + err.Error()
+		return res
+	}
+	if err := os.Chmod(localPath, mode); err != nil {
+		res.State = "error"
+		res.Error = "设置本机权限失败: " + err.Error()
+		return res
+	}
+
+	res.Overwritten = existed
+	res.State = "success"
 	return res
 }
 
@@ -367,8 +503,8 @@ func expandLocalFiles(f StepUploadFile) ([]localRemotePair, error) {
 	return pairs, nil
 }
 
-// uploadOne 上传单个文件：同名已存在且未开启覆盖 -> 跳过(skipped)；否则创建父目录、流式写入并设置权限。
-func uploadOne(sc *sftp.Client, step ExecStep, f StepUploadFile, localPath, remotePath string) *UploadResult {
+// pushOne 推送单个文件到远端：同名已存在且未开启覆盖 -> 跳过(skipped)；否则创建父目录、流式写入并设置权限。
+func pushOne(sc *sftp.Client, step ExecStep, f StepUploadFile, localPath, remotePath string) *UploadResult {
 	res := &UploadResult{Local: localPath, Remote: remotePath}
 
 	mode, err := StepFileMode(step, f)
@@ -438,8 +574,8 @@ func uploadOne(sc *sftp.Client, step ExecStep, f StepUploadFile, localPath, remo
 	return res
 }
 
-// uploadResultLine 单条上传结果的一行摘要（用于步骤 Output）
-func uploadResultLine(u *UploadResult) string {
+// filesResultLine 单条传输结果的一行摘要（用于步骤 Output；push 为 local->remote，pull 为 remote->local）
+func filesResultLine(u *UploadResult) string {
 	switch u.State {
 	case "success":
 		if u.Overwritten {
@@ -458,16 +594,16 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// ---------- script 模块（本地 / 远端执行命令或脚本） ----------
+// ---------- command 模块（本地 / 远端：先 cd 到 workdir 再执行命令或脚本） ----------
 
-// runRemoteScript 通过 SSH 在远端执行脚本步骤：内容经 stdin 以 `bash -s` 执行（不经 shell 拼接）。
-// 支持 remoteWorkDir 先 cd 到指定目录；带步骤级超时，超时关闭会话强制中断；
+// runRemoteCommand 通过 SSH 在远端执行 command 步骤：内容经 stdin 以 `bash -s` 执行（不经 shell 拼接）。
+// 配置了 workdir 时先 `cd '<workdir>'`（绝对路径，单引号转义防注入）；带步骤级超时，超时关闭会话强制中断；
 // 结果分类：success / fail(收到退出码) / timeout / interrupted(会话被掐断，如 init 0/reboot) / error(未执行)。
-func runRemoteScript(client *ssh.Client, step ExecStep, name string) *ExecStepResult {
+func runRemoteCommand(client *ssh.Client, step ExecStep, name string) *ExecStepResult {
 	start := time.Now()
-	res := &ExecStepResult{Name: name, Type: "script", Target: "remote", ExitCode: -1}
+	res := &ExecStepResult{Name: name, Type: "command", Target: "remote", ExitCode: -1}
 
-	content, err := StepScriptContent(step)
+	content, err := StepCommandContent(step)
 	if err != nil {
 		res.State = "error"
 		res.Error = err.Error()
@@ -498,8 +634,8 @@ func runRemoteScript(client *ssh.Client, step ExecStep, name string) *ExecStepRe
 
 	done := make(chan error, 1)
 	cmd := "bash -s"
-	if step.RemoteWorkDir != "" {
-		cmd = "cd " + shellQuote(step.RemoteWorkDir) + " && bash -s"
+	if step.Workdir != "" {
+		cmd = "cd " + shellQuote(step.Workdir) + " && bash -s"
 	}
 	go func() { done <- session.Run(cmd) }()
 
@@ -534,13 +670,14 @@ func runRemoteScript(client *ssh.Client, step ExecStep, name string) *ExecStepRe
 	return res
 }
 
-// runLocalScript 在本机执行脚本步骤：内容经 shell 执行（Unix 用 sh -s 传 stdin；Windows 用 cmd /C）。
-// 带步骤级超时，超时强制 kill；结果分类：success / fail / timeout / error(未执行)。
-func runLocalScript(step ExecStep, name string) *ExecStepResult {
+// runLocalCommand 在本机执行 command 步骤：先进入 workdir（cmd.Dir），内容经 shell 执行
+// （Unix 用 sh -s 传 stdin；Windows 用 cmd /C）。带步骤级超时，超时强制 kill；
+// 结果分类：success / fail / timeout / error(未执行)。
+func runLocalCommand(step ExecStep, name string) *ExecStepResult {
 	start := time.Now()
-	res := &ExecStepResult{Name: name, Type: "script", Target: "local", ExitCode: -1}
+	res := &ExecStepResult{Name: name, Type: "command", Target: "local", ExitCode: -1}
 
-	content, err := StepScriptContent(step)
+	content, err := StepCommandContent(step)
 	if err != nil {
 		res.State = "error"
 		res.Error = err.Error()
@@ -563,6 +700,9 @@ func runLocalScript(step ExecStep, name string) *ExecStepResult {
 	} else {
 		cmd = exec.Command("sh", "-s")
 		cmd.Stdin = strings.NewReader(content)
+	}
+	if step.Workdir != "" {
+		cmd.Dir = step.Workdir // 本地执行前先进入工作目录
 	}
 	setProcessGroup(cmd) // Unix: 独立进程组，超时时可整组杀掉（连带 sleep 等子进程）
 	var outBuf, errBuf bytes.Buffer
