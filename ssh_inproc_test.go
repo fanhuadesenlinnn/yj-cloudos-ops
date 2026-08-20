@@ -16,7 +16,7 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// 进程内 SSH 服务器：用于在无外部 sshd 的情况下端到端验证 trySSH/runScript
+// 进程内 SSH 服务器：用于在无外部 sshd 的情况下端到端验证 trySSH/runPipeline
 // （stdin 传脚本、退出码、超时中断、会话中断）。仅支持 session 通道的 exec 请求。
 
 // inProcOpts 测试服务器选项
@@ -165,7 +165,7 @@ func runRemoteCommand(channel ssh.Channel, command string) {
 	channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{status}))
 }
 
-// inProcSSHCfg 构造指向进程内 SSH 服务器的配置（只测脚本，关闭状态/服务采集）
+// inProcSSHCfg 构造指向进程内 SSH 服务器的配置（默认流水线为空，测试各自配置 execList）
 func inProcSSHCfg(addr string) *Config {
 	cfg := &Config{}
 	cfg.SSH.Username = "root"
@@ -175,50 +175,55 @@ func inProcSSHCfg(addr string) *Config {
 	cfg.SSH.Port = port
 	cfg.SSH.Timeout = "5s"
 	cfg.SSH.VerifyCommand = "echo ok"
-	cfg.SSH.CheckStatus = boolPtr(false)
-	cfg.SSH.CheckServices = boolPtr(false)
 	return cfg
 }
 
 func boolPtr(b bool) *bool { return &b }
 
+// scriptStep 便捷构造 script 步骤
+func scriptStep(target, content string) ExecStep {
+	return ExecStep{Name: "脚本", Type: "script", Target: target, Script: content, Timeout: "5s"}
+}
+
 // 脚本内容通过 stdin 传给远端 bash -s，正常输出与退出码
 func TestScriptExecInProc(t *testing.T) {
 	addr := startInProcSSHServer(t, "Test@12345")
 	cfg := inProcSSHCfg(addr)
-	cfg.SSH.Script = "echo hello-from-script; echo '含 中文 和 \"引号\" $符号'"
-	cfg.SSH.ScriptTimeout = "5s"
+	cfg.ExecList = []ExecStep{scriptStep("remote", "echo hello-from-script; echo '含 中文 和 \"引号\" $符号'")}
 
-	_, _, uploads, script, err := trySSH(cfg, "127.0.0.1", "Test@12345")
+	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
 	if err != nil {
 		t.Fatalf("trySSH 失败: %v", err)
 	}
-	_ = uploads
-	if script == nil || !script.OK || script.ExitCode != 0 || script.State != "success" {
-		t.Fatalf("脚本应成功: %+v", script)
+	if len(steps) != 1 {
+		t.Fatalf("应有一个步骤结果: %+v", steps)
 	}
-	if !strings.Contains(script.Output, "hello-from-script") {
-		t.Errorf("脚本输出缺失: %q", script.Output)
+	s := steps[0]
+	if s == nil || s.State != "success" || s.ExitCode != 0 {
+		t.Fatalf("脚本应成功: %+v", s)
 	}
-	if !strings.Contains(script.Output, "含 中文") {
-		t.Errorf("中文/特殊字符输出缺失: %q", script.Output)
+	if !strings.Contains(s.Output, "hello-from-script") {
+		t.Errorf("脚本输出缺失: %q", s.Output)
 	}
-	t.Logf("脚本输出: %s", script.Output)
+	if !strings.Contains(s.Output, "含 中文") {
+		t.Errorf("中文/特殊字符输出缺失: %q", s.Output)
+	}
+	t.Logf("脚本输出: %s", s.Output)
 }
 
 // 非零退出码：标记失败(State=fail)但登录结果不受影响
 func TestScriptExecNonZeroExitInProc(t *testing.T) {
 	addr := startInProcSSHServer(t, "Test@12345")
 	cfg := inProcSSHCfg(addr)
-	cfg.SSH.Script = "echo before-fail; exit 42"
-	cfg.SSH.ScriptTimeout = "5s"
+	cfg.ExecList = []ExecStep{scriptStep("remote", "echo before-fail; exit 42")}
 
-	result, _, _, _, script := testOne(cfg, &VM{IP: "127.0.0.1", Password: "Test@12345"})
+	result, _, _, steps := testOne(cfg, &VM{IP: "127.0.0.1", Password: "Test@12345"}, nil, false)
 	if !strings.HasPrefix(result, "✓") {
 		t.Errorf("登录结果不应受脚本失败影响: %q", result)
 	}
-	if script == nil || script.OK || script.ExitCode != 42 || script.State != "fail" {
-		t.Errorf("脚本应标记失败且退出码42: %+v", script)
+	s := steps[0]
+	if s == nil || s.State != "fail" || s.ExitCode != 42 {
+		t.Errorf("脚本应标记失败且退出码42: %+v", s)
 	}
 }
 
@@ -226,21 +231,21 @@ func TestScriptExecNonZeroExitInProc(t *testing.T) {
 func TestScriptExecInterruptedInProc(t *testing.T) {
 	addr := startInProcSSHServerOpts(t, "Test@12345", inProcOpts{AbortBashS: true})
 	cfg := inProcSSHCfg(addr)
-	cfg.SSH.Script = "echo before-interrupt"
-	cfg.SSH.ScriptTimeout = "5s"
+	cfg.ExecList = []ExecStep{scriptStep("remote", "echo before-interrupt")}
 
-	result, _, _, _, script := testOne(cfg, &VM{IP: "127.0.0.1", Password: "Test@12345"})
+	result, _, _, steps := testOne(cfg, &VM{IP: "127.0.0.1", Password: "Test@12345"}, nil, false)
 	if !strings.HasPrefix(result, "✓") {
 		t.Errorf("登录结果不应受会话中断影响: %q", result)
 	}
-	if script == nil || script.OK || script.State != "interrupted" {
-		t.Errorf("脚本应标记会话中断: %+v", script)
+	s := steps[0]
+	if s == nil || s.State != "interrupted" {
+		t.Errorf("脚本应标记会话中断: %+v", s)
 	}
-	if script.ExitCode != -1 {
-		t.Errorf("会话中断退出码应为-1: %+v", script)
+	if s.ExitCode != -1 {
+		t.Errorf("会话中断退出码应为-1: %+v", s)
 	}
-	if !strings.Contains(script.Output, "shutting down") {
-		t.Errorf("应保留中断前已收到的输出: %q", script.Output)
+	if !strings.Contains(s.Output, "shutting down") {
+		t.Errorf("应保留中断前已收到的输出: %q", s.Output)
 	}
 }
 
@@ -248,38 +253,204 @@ func TestScriptExecInterruptedInProc(t *testing.T) {
 func TestScriptExecTimeoutInProc(t *testing.T) {
 	addr := startInProcSSHServer(t, "Test@12345")
 	cfg := inProcSSHCfg(addr)
-	cfg.SSH.Script = "sleep 30; echo never"
-	cfg.SSH.ScriptTimeout = "1s"
+	step := scriptStep("remote", "sleep 30; echo never")
+	step.Timeout = "1s"
+	cfg.ExecList = []ExecStep{step}
 
 	start := time.Now()
-	result, _, _, _, script := testOne(cfg, &VM{IP: "127.0.0.1", Password: "Test@12345"})
+	result, _, _, steps := testOne(cfg, &VM{IP: "127.0.0.1", Password: "Test@12345"}, nil, false)
 	if err := time.Since(start); err > 5*time.Second {
 		t.Errorf("超时未生效，耗时: %v", err)
 	}
 	if !strings.HasPrefix(result, "✓") {
 		t.Errorf("登录结果不应受脚本超时影响: %q", result)
 	}
-	if script == nil || script.OK || script.State != "timeout" {
-		t.Errorf("脚本应标记超时失败: %+v", script)
+	s := steps[0]
+	if s == nil || s.State != "timeout" {
+		t.Errorf("脚本应标记超时失败: %+v", s)
 	}
-	if !strings.Contains(script.Error, "超时") {
-		t.Errorf("错误信息应包含超时: %q", script.Error)
+	if !strings.Contains(s.Error, "超时") {
+		t.Errorf("错误信息应包含超时: %q", s.Error)
 	}
 }
 
-// 认证失败时脚本结果应为空
+// 认证失败时不应有步骤结果
 func TestScriptNotRunOnAuthFailInProc(t *testing.T) {
 	addr := startInProcSSHServer(t, "Test@12345")
 	cfg := inProcSSHCfg(addr)
-	cfg.SSH.Script = "echo never-runs"
-	cfg.SSH.ScriptTimeout = "5s"
+	cfg.ExecList = []ExecStep{scriptStep("remote", "echo never-runs")}
 
-	result, _, _, script, err := trySSH(cfg, "127.0.0.1", "wrong-password")
+	_, _, steps, err := trySSH(cfg, "127.0.0.1", "wrong-password", nil, false)
 	if err == nil {
 		t.Fatalf("密码错误应登录失败")
 	}
-	_ = result
-	if script != nil {
-		t.Errorf("登录失败时不应有脚本结果: %+v", script)
+	if steps != nil {
+		t.Errorf("登录失败时不应有步骤结果: %+v", steps)
+	}
+}
+
+// 流水线顺序执行 + onError=stop：第1步失败则第2步不执行（skipped）
+func TestPipelineStopOnErrorInProc(t *testing.T) {
+	addr := startInProcSSHServer(t, "Test@12345")
+	cfg := inProcSSHCfg(addr)
+	cfg.ExecList = []ExecStep{
+		scriptStep("remote", "echo fail-first; exit 3"),
+		scriptStep("remote", "echo should-not-run"),
+	}
+
+	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
+	if err != nil {
+		t.Fatalf("trySSH 失败: %v", err)
+	}
+	if steps[0].State != "fail" {
+		t.Errorf("第1步应失败: %+v", steps[0])
+	}
+	if steps[1].State != "skipped" {
+		t.Errorf("第2步应被跳过(上游失败): %+v", steps[1])
+	}
+}
+
+// onError=continue：第1步失败后第2步照常执行
+func TestPipelineContinueOnErrorInProc(t *testing.T) {
+	addr := startInProcSSHServer(t, "Test@12345")
+	cfg := inProcSSHCfg(addr)
+	cfg.ExecList = []ExecStep{
+		{Name: "失败步骤", Type: "script", Target: "remote", Script: "exit 9", Timeout: "5s", OnError: "continue"},
+		scriptStep("remote", "echo still-runs"),
+	}
+
+	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
+	if err != nil {
+		t.Fatalf("trySSH 失败: %v", err)
+	}
+	if steps[0].State != "fail" {
+		t.Errorf("第1步应失败: %+v", steps[0])
+	}
+	if steps[1].State != "success" {
+		t.Errorf("onError=continue 时第2步应照常执行: %+v", steps[1])
+	}
+}
+
+// 本地 once 步骤：阶段一执行一次，每台机器复用结果
+func TestPipelineLocalOnceInProc(t *testing.T) {
+	addr := startInProcSSHServer(t, "Test@12345")
+	cfg := inProcSSHCfg(addr)
+	cfg.ExecList = []ExecStep{
+		{Name: "本地准备", Type: "script", Target: "local", Run: "once", Command: "echo local-once", Timeout: "5s"},
+		scriptStep("remote", "echo remote-step"),
+	}
+
+	onceResults, stopped := runPipelineOnce(cfg)
+	if stopped {
+		t.Fatalf("本地步骤不应终止流水线")
+	}
+	if onceResults[0] == nil || onceResults[0].State != "success" {
+		t.Fatalf("本地 once 步骤应成功: %+v", onceResults[0])
+	}
+	if !strings.Contains(onceResults[0].Output, "local-once") {
+		t.Errorf("本地步骤输出缺失: %q", onceResults[0].Output)
+	}
+
+	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", onceResults, false)
+	if err != nil {
+		t.Fatalf("trySSH 失败: %v", err)
+	}
+	if len(steps) != 2 {
+		t.Fatalf("应有2个步骤结果: %+v", steps)
+	}
+	if steps[0] != onceResults[0] {
+		t.Errorf("本地 once 步骤应复用阶段一结果")
+	}
+	if steps[1].State != "success" || !strings.Contains(steps[1].Output, "remote-step") {
+		t.Errorf("远端步骤应执行成功: %+v", steps[1])
+	}
+}
+
+// 本地 once 步骤失败且 onError=stop：全局终止，远端步骤全部 skipped
+func TestPipelineLocalOnceFailStopsGlobal(t *testing.T) {
+	addr := startInProcSSHServer(t, "Test@12345")
+	cfg := inProcSSHCfg(addr)
+	cfg.ExecList = []ExecStep{
+		{Name: "本地构建", Type: "script", Target: "local", Run: "once", Command: "exit 5", Timeout: "5s"},
+		scriptStep("remote", "echo never"),
+	}
+
+	onceResults, stopped := runPipelineOnce(cfg)
+	if !stopped {
+		t.Fatalf("本地步骤失败应全局终止")
+	}
+	if onceResults[0].State != "fail" {
+		t.Errorf("本地步骤应失败: %+v", onceResults[0])
+	}
+
+	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", onceResults, true)
+	if err != nil {
+		t.Fatalf("trySSH 失败: %v", err)
+	}
+	if steps[0] != onceResults[0] {
+		t.Errorf("本地 once 步骤应复用阶段一结果")
+	}
+	if steps[1].State != "skipped" {
+		t.Errorf("全局终止后远端步骤应 skipped: %+v", steps[1])
+	}
+}
+
+// 显式空 execList（execList: []）：只测 SSH 连通性，不执行任何步骤
+func TestEmptyExecListInProc(t *testing.T) {
+	addr := startInProcSSHServer(t, "Test@12345")
+	cfg := inProcSSHCfg(addr)
+	cfg.ExecList = []ExecStep{} // 显式空流水线
+
+	result, _, _, steps := testOne(cfg, &VM{IP: "127.0.0.1", Password: "Test@12345"}, nil, false)
+	if !strings.HasPrefix(result, "✓") {
+		t.Errorf("登录应成功: %q", result)
+	}
+	if len(steps) != 0 {
+		t.Errorf("显式空流水线不应有步骤结果: %+v", steps)
+	}
+}
+
+// 默认流水线（未配置 execList）：登录后自动执行 status -> services 两步
+func TestDefaultPipelineInProc(t *testing.T) {
+	addr := startInProcSSHServer(t, "Test@12345")
+	cfg := inProcSSHCfg(addr) // 不配置 ExecList
+
+	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
+	if err != nil {
+		t.Fatalf("trySSH 失败: %v", err)
+	}
+	if len(steps) != 2 {
+		t.Fatalf("默认流水线应为2步: %+v", steps)
+	}
+	if steps[0].Type != "status" || steps[1].Type != "services" {
+		t.Errorf("默认流水线顺序错误: %+v", steps)
+	}
+}
+
+// 本地脚本：成功/失败/超时
+func TestLocalScriptInProc(t *testing.T) {
+	// 成功
+	res := runLocalScript(ExecStep{Name: "本地", Type: "script", Target: "local", Command: "echo hello-local; exit 0", Timeout: "5s"}, "本地")
+	if res.State != "success" || res.ExitCode != 0 || !strings.Contains(res.Output, "hello-local") {
+		t.Errorf("本地脚本应成功: %+v", res)
+	}
+	// 失败
+	res = runLocalScript(ExecStep{Name: "本地", Type: "script", Target: "local", Command: "echo oops; exit 7", Timeout: "5s"}, "本地")
+	if res.State != "fail" || res.ExitCode != 7 {
+		t.Errorf("本地脚本应失败 exit7: %+v", res)
+	}
+	// 超时：应快速返回（进程组被杀，不会等 sleep 自然结束）
+	start := time.Now()
+	res = runLocalScript(ExecStep{Name: "本地", Type: "script", Target: "local", Command: "sleep 30", Timeout: "1s"}, "本地")
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("本地脚本超时应快速返回，实际耗时: %v", elapsed)
+	}
+	if res.State != "timeout" || !strings.Contains(res.Error, "超时") {
+		t.Errorf("本地脚本应超时: %+v", res)
+	}
+	// 空内容
+	res = runLocalScript(ExecStep{Name: "本地", Type: "script", Target: "local"}, "本地")
+	if res.State != "error" {
+		t.Errorf("空内容应报错: %+v", res)
 	}
 }

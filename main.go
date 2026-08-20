@@ -73,26 +73,24 @@ func main() {
 		os.Exit(0)
 	}
 
-	// 配置了脚本时提前加载，文件不存在/不可读直接退出，避免每台机器重复报同一个错
-	if cfg.ScriptEnabled() {
-		if _, err := cfg.ScriptContent(); err != nil {
-			fmt.Fprintf(os.Stderr, "加载脚本失败: %v\n", err)
-			os.Exit(1)
+	// 阶段一：流水线中 target=local 且 run=once 的步骤只跑一次（如本地构建/打包），
+	// 结果供每台机器复用；某步失败且 onError=stop 则全局终止，不再执行远端步骤。
+	for i, step := range cfg.EffectiveSteps() {
+		if StepTarget(step) != "local" || StepRunMode(step) != "once" {
+			continue
 		}
+		fmt.Fprintf(os.Stderr, "[流水线] 本地步骤: %s\n", StepName(step, i))
+	}
+	onceResults, globalStopped := runPipelineOnce(cfg)
+	for i, res := range onceResults {
+		if res == nil {
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "[流水线] 本地步骤完成: %s -> %s（%s）\n", StepName(cfg.EffectiveSteps()[i], i), stepResultLabel(res), res.Duration)
 	}
 
-	// 配置了上传时提前检查本地文件存在性，缺失直接退出，避免每台机器重复报同一个错
-	if cfg.UploadEnabled() {
-		for _, f := range cfg.SSH.Upload {
-			if _, err := os.Stat(f.Local); err != nil {
-				fmt.Fprintf(os.Stderr, "上传文件不存在: %s: %v\n", f.Local, err)
-				os.Exit(1)
-			}
-		}
-	}
-
-	// 3. SSH 登录测试 + 服务器运行状态采集（并发，进度输出到 stderr）
-	runSSHTests(cfg, vms)
+	// 3. SSH 登录测试 + 流水线步骤执行（并发，进度输出到 stderr）
+	runSSHTests(cfg, vms, onceResults, globalStopped)
 
 	// 4. 屏幕输出 + 可选导出
 	if err := outputTable(cfg, vms); err != nil {

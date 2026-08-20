@@ -24,47 +24,39 @@ func TestTruncate(t *testing.T) {
 	}
 }
 
-func TestScriptStr(t *testing.T) {
-	if got := scriptStr(&VM{}); got != "—" {
-		t.Errorf("未配置脚本应显示 —: %q", got)
+func TestPipelineStr(t *testing.T) {
+	if got := pipelineStr(&VM{}); got != "—" {
+		t.Errorf("无步骤应显示 —: %q", got)
 	}
-	if got := scriptStr(&VM{Script: &ScriptResult{OK: true, State: "success"}}); got != "✓ 成功" {
-		t.Errorf("成功应显示 ✓ 成功: %q", got)
-	}
-	if got := scriptStr(&VM{Script: &ScriptResult{OK: false, ExitCode: 7, State: "fail"}}); got != "✗ 失败(exit 7)" {
-		t.Errorf("失败应显示退出码: %q", got)
-	}
-	if got := scriptStr(&VM{Script: &ScriptResult{OK: false, State: "timeout"}}); got != "✗ 超时" {
-		t.Errorf("超时应显示 ✗ 超时: %q", got)
-	}
-	if got := scriptStr(&VM{Script: &ScriptResult{OK: false, State: "interrupted"}}); got != "✗ 会话中断(疑似关机/重启)" {
-		t.Errorf("会话中断应独立标记: %q", got)
-	}
-	if got := scriptStr(&VM{Script: &ScriptResult{OK: false, State: "error", Error: "脚本内容为空"}}); got != "✗ 脚本内容为空" {
-		t.Errorf("error 状态应展示原因: %q", got)
-	}
-	// 长错误信息应截断
-	longErr := strings.Repeat("错误", 40)
-	if got := scriptStr(&VM{Script: &ScriptResult{OK: false, State: "error", Error: longErr}}); len([]rune(got)) > 35 {
-		t.Errorf("长错误信息应截断: %q", got)
+	vm := &VM{ExecSteps: []*ExecStepResult{
+		{Name: "a", State: "success"},
+		{Name: "b", State: "fail"},
+		{Name: "c", State: "timeout"},
+		{Name: "d", State: "interrupted"},
+		{Name: "e", State: "skipped"},
+		{Name: "f", State: "error"},
+	}}
+	if got := pipelineStr(vm); got != "1✓ 2✗ 3超 4断 5- 6!" {
+		t.Errorf("流水线摘要错误: %q", got)
 	}
 }
 
-func TestScriptResultLabel(t *testing.T) {
+func TestStepResultLabel(t *testing.T) {
 	cases := []struct {
-		s    *ScriptResult
+		s    *ExecStepResult
 		want string
 	}{
-		{nil, "未配置脚本"},
-		{&ScriptResult{State: "success", OK: true}, "成功"},
-		{&ScriptResult{State: "fail", ExitCode: 42}, "失败(exit 42)"},
-		{&ScriptResult{State: "timeout"}, "超时"},
-		{&ScriptResult{State: "interrupted"}, "会话中断(疑似关机/重启)"},
-		{&ScriptResult{State: "error", Error: "读取脚本文件 x 失败"}, "未执行: 读取脚本文件 x 失败"},
+		{nil, "未执行"},
+		{&ExecStepResult{State: "success"}, "成功"},
+		{&ExecStepResult{State: "fail", ExitCode: 42}, "失败(exit 42)"},
+		{&ExecStepResult{State: "timeout"}, "超时"},
+		{&ExecStepResult{State: "interrupted"}, "会话中断(疑似关机/重启)"},
+		{&ExecStepResult{State: "skipped"}, "未执行(上游失败)"},
+		{&ExecStepResult{State: "error", Error: "读取脚本文件 x 失败"}, "未执行: 读取脚本文件 x 失败"},
 	}
 	for _, c := range cases {
-		if got := scriptResultLabel(c.s); got != c.want {
-			t.Errorf("scriptResultLabel(%+v) = %q, want %q", c.s, got, c.want)
+		if got := stepResultLabel(c.s); got != c.want {
+			t.Errorf("stepResultLabel(%+v) = %q, want %q", c.s, got, c.want)
 		}
 	}
 }
@@ -151,7 +143,7 @@ func TestSanitizeFileName(t *testing.T) {
 }
 
 // 失败现场回显：捕获 stderr，验证只回显状态与输出尾部（最后20行）
-func TestPrintScriptFailure(t *testing.T) {
+func TestPrintStepFailure(t *testing.T) {
 	old := os.Stderr
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -165,13 +157,13 @@ func TestPrintScriptFailure(t *testing.T) {
 		lines = append(lines, fmt.Sprintf("l%d", i))
 	}
 	vm := &VM{Name: "web-01", IP: "10.0.0.1"}
-	s := &ScriptResult{OK: false, ExitCode: 1, State: "fail", Error: "exit status 1", Output: strings.Join(lines, "\n")}
-	printScriptFailure(vm, s)
+	s := &ExecStepResult{Name: "部署", Type: "script", Target: "remote", ExitCode: 1, State: "fail", Error: "exit status 1", Output: strings.Join(lines, "\n")}
+	printStepFailure(vm, s)
 	w.Close()
 	out, _ := io.ReadAll(r)
 	got := string(out)
 
-	if !strings.Contains(got, "[脚本] web-01 (10.0.0.1)") || !strings.Contains(got, "失败(exit 1)") {
+	if !strings.Contains(got, "[流水线] web-01 (10.0.0.1) 步骤[部署]") || !strings.Contains(got, "失败(exit 1)") {
 		t.Errorf("应包含机器名与状态: %s", got)
 	}
 	if !strings.Contains(got, "原因: exit status 1") {
@@ -191,7 +183,7 @@ func TestPrintScriptFailure(t *testing.T) {
 func TestWriteScriptLog(t *testing.T) {
 	dir := t.TempDir()
 	vm := &VM{Name: "web/01:主", IP: "10.0.0.1"}
-	s := &ScriptResult{OK: false, ExitCode: 7, State: "fail", Error: "exit status 7", Output: "line1\nline2"}
+	s := &ExecStepResult{Name: "部署脚本", Type: "script", Target: "remote", ExitCode: 7, State: "fail", Error: "exit status 7", Output: "line1\nline2"}
 	writeScriptLog(dir, vm, s)
 
 	files, _ := filepath.Glob(filepath.Join(dir, "*"))
@@ -203,90 +195,196 @@ func TestWriteScriptLog(t *testing.T) {
 	}
 	data, _ := os.ReadFile(files[0])
 	content := string(data)
-	for _, want := range []string{"web/01:主", "失败(exit 7)", "exit status 7", "line2"} {
+	for _, want := range []string{"web/01:主", "失败(exit 7)", "exit status 7", "line2", "部署脚本"} {
 		if !strings.Contains(content, want) {
 			t.Errorf("日志缺少 %q: %s", want, content)
 		}
 	}
 }
 
-func TestScriptEnabled(t *testing.T) {
-	cfg := &Config{}
-	if cfg.ScriptEnabled() {
-		t.Errorf("空配置不应启用脚本")
+func TestStepScriptContent(t *testing.T) {
+	// command 优先
+	content, err := StepScriptContent(ExecStep{Command: "echo hi", Script: "echo no"})
+	if err != nil || content != "echo hi" {
+		t.Errorf("command 应优先: %q err=%v", content, err)
 	}
-	cfg = &Config{}
-	cfg.SSH.Script = "echo hi"
-	if !cfg.ScriptEnabled() {
-		t.Errorf("内嵌脚本应启用")
+	// 内嵌 script
+	content, err = StepScriptContent(ExecStep{Script: "echo inline\n"})
+	if err != nil || content != "echo inline\n" {
+		t.Errorf("内嵌脚本内容错误: %q err=%v", content, err)
 	}
-	cfg = &Config{}
-	cfg.SSH.ScriptPath = "x.sh"
-	if !cfg.ScriptEnabled() {
-		t.Errorf("脚本路径应启用")
-	}
-}
-
-func TestScriptContentInline(t *testing.T) {
-	cfg := &Config{}
-	cfg.SSH.Script = "#!/bin/bash\necho hi\n"
-	content, err := cfg.ScriptContent()
-	if err != nil {
-		t.Fatalf("内嵌脚本加载失败: %v", err)
-	}
-	if content != "#!/bin/bash\necho hi\n" {
-		t.Errorf("内嵌脚本内容错误: %q", content)
-	}
-	// 重复调用应返回相同结果（sync.Once 缓存）
-	content2, _ := cfg.ScriptContent()
-	if content2 != content {
-		t.Errorf("缓存失效")
-	}
-}
-
-func TestScriptContentFile(t *testing.T) {
+	// scriptPath 读取文件
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ops.sh")
-	script := "echo from-file\n"
-	if err := os.WriteFile(path, []byte(script), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("echo from-file\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfg := &Config{}
-	cfg.SSH.ScriptPath = path
-	content, err := cfg.ScriptContent()
-	if err != nil {
-		t.Fatalf("文件脚本加载失败: %v", err)
+	content, err = StepScriptContent(ExecStep{ScriptPath: path})
+	if err != nil || content != "echo from-file\n" {
+		t.Errorf("文件脚本内容错误: %q err=%v", content, err)
 	}
-	if content != script {
-		t.Errorf("文件脚本内容错误: %q", content)
-	}
-}
-
-func TestScriptContentFileMissing(t *testing.T) {
-	cfg := &Config{}
-	cfg.SSH.ScriptPath = filepath.Join(t.TempDir(), "not-exist.sh")
-	if _, err := cfg.ScriptContent(); err == nil {
+	// 文件不存在 -> 报错
+	content, err = StepScriptContent(ExecStep{ScriptPath: filepath.Join(dir, "not-exist.sh")})
+	if err == nil {
 		t.Errorf("文件不存在应报错")
 	}
 }
 
-func TestLoadConfigScriptMutualExclusion(t *testing.T) {
-	yaml := `
+func TestStepRunModeAndOnError(t *testing.T) {
+	// 默认值
+	if got := StepRunMode(ExecStep{Target: "local"}); got != "once" {
+		t.Errorf("local 默认 once: %q", got)
+	}
+	if got := StepRunMode(ExecStep{Target: "remote"}); got != "always" {
+		t.Errorf("remote 默认 always: %q", got)
+	}
+	if got := StepRunMode(ExecStep{}); got != "always" {
+		t.Errorf("未配置 target 默认 remote/always: %q", got)
+	}
+	if got := StepOnError(ExecStep{}); got != "stop" {
+		t.Errorf("onError 默认 stop: %q", got)
+	}
+	// 显式配置
+	if got := StepRunMode(ExecStep{Target: "local", Run: "always"}); got != "always" {
+		t.Errorf("显式 always: %q", got)
+	}
+	if got := StepOnError(ExecStep{OnError: "continue"}); got != "continue" {
+		t.Errorf("显式 continue: %q", got)
+	}
+}
+
+func TestLoadConfigExecListValidation(t *testing.T) {
+	base := `
 endpoint: "https://127.0.0.1:30990"
 accessKeyId: "ak"
 accessKeySecret: "sk"
 regionId: "cn-beijing"
 project:
   names: ["default"]
-ssh:
-  script: "echo hi"
-  scriptPath: "ops.sh"
 `
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
-		t.Fatal(err)
+	writeCfg := func(body string) (*Config, error) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, []byte(base+body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return loadConfig(path)
 	}
-	if _, err := loadConfig(path); err == nil || !strings.Contains(err.Error(), "只能配置一个") {
-		t.Errorf("script 与 scriptPath 同时配置应报错: %v", err)
+
+	// 未知步骤类型 -> 报错
+	if _, err := writeCfg("execList:\n    - type: \"foo\"\n"); err == nil || !strings.Contains(err.Error(), "type") {
+		t.Errorf("未知 type 应报错: %v", err)
+	}
+	// upload 缺 files -> 报错
+	if _, err := writeCfg("execList:\n    - type: \"upload\"\n"); err == nil || !strings.Contains(err.Error(), "files") {
+		t.Errorf("upload 缺 files 应报错: %v", err)
+	}
+	// upload remote 非绝对路径 -> 报错
+	if _, err := writeCfg("execList:\n    - type: \"upload\"\n      files:\n        - local: \"a.sh\"\n          remote: \"opt/a.sh\"\n"); err == nil || !strings.Contains(err.Error(), "绝对路径") {
+		t.Errorf("relative remote 应报错: %v", err)
+	}
+	// upload remote 以 / 结尾（未精确到文件）-> 报错
+	if _, err := writeCfg("execList:\n    - type: \"upload\"\n      files:\n        - local: \"a.sh\"\n          remote: \"/opt/\"\n"); err == nil || !strings.Contains(err.Error(), "精确到文件") {
+		t.Errorf("remote 以 / 结尾应报错: %v", err)
+	}
+	// upload mode 非法 -> 报错
+	if _, err := writeCfg("execList:\n    - type: \"upload\"\n      files:\n        - local: \"a.sh\"\n          remote: \"/opt/a.sh\"\n          mode: \"888\"\n"); err == nil || !strings.Contains(err.Error(), "mode") {
+		t.Errorf("非法 mode 应报错: %v", err)
+	}
+	// upload target 不能为 local -> 报错
+	if _, err := writeCfg("execList:\n    - type: \"upload\"\n      target: \"local\"\n      files:\n        - local: \"a.sh\"\n          remote: \"/opt/a.sh\"\n"); err == nil || !strings.Contains(err.Error(), "target") {
+		t.Errorf("upload target=local 应报错: %v", err)
+	}
+	// script 缺内容 -> 报错
+	if _, err := writeCfg("execList:\n    - type: \"script\"\n"); err == nil || !strings.Contains(err.Error(), "command / script / scriptPath") {
+		t.Errorf("script 缺内容应报错: %v", err)
+	}
+	// script command 与 script 同时配置 -> 报错
+	if _, err := writeCfg("execList:\n    - type: \"script\"\n      command: \"echo a\"\n      script: \"echo b\"\n"); err == nil || !strings.Contains(err.Error(), "只能配置一个") {
+		t.Errorf("command+script 同时配置应报错: %v", err)
+	}
+	// script timeout 非法 -> 报错
+	if _, err := writeCfg("execList:\n    - type: \"script\"\n      command: \"echo a\"\n      timeout: \"abc\"\n"); err == nil || !strings.Contains(err.Error(), "timeout") {
+		t.Errorf("非法 timeout 应报错: %v", err)
+	}
+	// script remoteWorkDir 非绝对路径 -> 报错
+	if _, err := writeCfg("execList:\n    - type: \"script\"\n      command: \"echo a\"\n      remoteWorkDir: \"opt\"\n"); err == nil || !strings.Contains(err.Error(), "remoteWorkDir") {
+		t.Errorf("relative remoteWorkDir 应报错: %v", err)
+	}
+	// run / onError 非法 -> 报错
+	if _, err := writeCfg("execList:\n    - type: \"script\"\n      command: \"echo a\"\n      run: \"sometimes\"\n"); err == nil || !strings.Contains(err.Error(), "run") {
+		t.Errorf("非法 run 应报错: %v", err)
+	}
+	if _, err := writeCfg("execList:\n    - type: \"script\"\n      command: \"echo a\"\n      onError: \"maybe\"\n"); err == nil || !strings.Contains(err.Error(), "onError") {
+		t.Errorf("非法 onError 应报错: %v", err)
+	}
+	// 合法配置 -> 通过
+	cfg, err := writeCfg(`execList:
+  - name: "上传"
+    type: upload
+    files:
+      - local: "a.sh"
+        remote: "/opt/a.sh"
+        mode: "0755"
+        overwrite: true
+      - local: "b.conf"
+        remote: "/etc/b.conf"
+  - name: "部署"
+    type: script
+    target: remote
+    command: "bash /opt/a.sh"
+    timeout: 30s
+  - name: "检查服务"
+    type: services
+    services: ["sshd", "docker"]
+  - name: "采集状态"
+    type: status
+`)
+	if err != nil {
+		t.Fatalf("合法配置不应报错: %v", err)
+	}
+	steps := cfg.ExecList
+	if len(steps) != 4 {
+		t.Fatalf("步骤数量错误: %d", len(steps))
+	}
+	if !StepShouldOverwrite(steps[0], steps[0].Files[0]) {
+		t.Errorf("单文件 overwrite=true 应生效")
+	}
+	if StepShouldOverwrite(steps[0], steps[0].Files[1]) {
+		t.Errorf("缺省应不覆盖")
+	}
+	if got := StepServiceNames(steps[2]); len(got) != 2 || got[0] != "sshd" {
+		t.Errorf("services 列表错误: %v", got)
+	}
+}
+
+// 未配置 exec-list 时走默认流水线（status -> services）
+func TestEffectiveStepsDefault(t *testing.T) {
+	cfg := &Config{}
+	steps := cfg.EffectiveSteps()
+	if len(steps) != 2 {
+		t.Fatalf("默认流水线应为2步: %d", len(steps))
+	}
+	if steps[0].Type != "status" || steps[1].Type != "services" {
+		t.Errorf("默认流水线应为 status -> services: %+v", steps)
+	}
+	// 显式空列表（execList: []）：不执行任何步骤，只测 SSH 连通性
+	cfg.ExecList = []ExecStep{}
+	if steps := cfg.EffectiveSteps(); len(steps) != 0 {
+		t.Errorf("显式空 execList 应返回空流水线: %+v", steps)
+	}
+	// 配置了 exec-list 则用配置的
+	cfg.ExecList = []ExecStep{{Type: "script", Command: "echo hi"}}
+	steps = cfg.EffectiveSteps()
+	if len(steps) != 1 || steps[0].Type != "script" {
+		t.Errorf("配置 exec-list 后应使用配置的: %+v", steps)
+	}
+}
+
+func TestStepName(t *testing.T) {
+	if got := StepName(ExecStep{Name: "上传"}, 0); got != "上传" {
+		t.Errorf("应使用配置的步骤名: %q", got)
+	}
+	if got := StepName(ExecStep{}, 2); got != "step3" {
+		t.Errorf("缺省应自动生成 step3: %q", got)
 	}
 }

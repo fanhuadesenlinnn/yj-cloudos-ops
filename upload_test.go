@@ -10,49 +10,6 @@ import (
 
 // ---------- 配置与辅助函数 ----------
 
-func TestUploadEnabled(t *testing.T) {
-	cfg := &Config{}
-	if cfg.UploadEnabled() {
-		t.Errorf("空配置不应启用上传")
-	}
-	cfg.SSH.Upload = []UploadFile{{Local: "a.sh", Remote: "/opt/a.sh"}}
-	if !cfg.UploadEnabled() {
-		t.Errorf("配置了 upload 应启用")
-	}
-}
-
-func TestUploadMkdirsEnabled(t *testing.T) {
-	if got := (&Config{}).UploadMkdirsEnabled(); !got {
-		t.Errorf("未配置 uploadMkdirs 应默认 true")
-	}
-	cfg := &Config{}
-	cfg.SSH.UploadMkdirs = boolPtr(false)
-	if got := cfg.UploadMkdirsEnabled(); got {
-		t.Errorf("uploadMkdirs=false 应返回 false")
-	}
-}
-
-func TestUploadShouldOverwrite(t *testing.T) {
-	// 缺省用全局
-	cfg := &Config{}
-	if got := cfg.UploadShouldOverwrite(UploadFile{}); got {
-		t.Errorf("全局默认应为不覆盖: %v", got)
-	}
-	cfg.SSH.UploadOverwrite = true
-	if got := cfg.UploadShouldOverwrite(UploadFile{}); !got {
-		t.Errorf("全局 uploadOverwrite=true 应覆盖")
-	}
-	// 单文件 overwrite 优先
-	cfg.SSH.UploadOverwrite = true
-	if got := cfg.UploadShouldOverwrite(UploadFile{Overwrite: boolPtr(false)}); got {
-		t.Errorf("单文件 overwrite=false 应覆盖全局 true")
-	}
-	cfg.SSH.UploadOverwrite = false
-	if got := cfg.UploadShouldOverwrite(UploadFile{Overwrite: boolPtr(true)}); !got {
-		t.Errorf("单文件 overwrite=true 应覆盖全局 false")
-	}
-}
-
 func TestParseFileMode(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"0755", "0755"},
@@ -79,22 +36,48 @@ func TestParseFileMode(t *testing.T) {
 	}
 }
 
-func TestUploadFileModeDefault(t *testing.T) {
-	cfg := &Config{}
-	m, err := cfg.UploadFileMode(UploadFile{})
+func TestStepFileModeDefault(t *testing.T) {
+	step := ExecStep{Type: "upload"}
+	m, err := StepFileMode(step, StepUploadFile{})
 	if err != nil {
 		t.Fatalf("默认权限解析失败: %v", err)
 	}
 	if got := fmt.Sprintf("%04o", m); got != "0644" {
 		t.Errorf("默认权限应为 0644: %s", got)
 	}
-	cfg.SSH.Upload = []UploadFile{{Local: "a", Remote: "/a", Mode: "0755"}}
-	m, err = cfg.UploadFileMode(cfg.SSH.Upload[0])
+	m, err = StepFileMode(step, StepUploadFile{Mode: "0755"})
 	if err != nil {
 		t.Fatalf("0755 解析失败: %v", err)
 	}
 	if got := fmt.Sprintf("%04o", m); got != "0755" {
 		t.Errorf("权限应为 0755: %s", got)
+	}
+}
+
+func TestStepShouldOverwrite(t *testing.T) {
+	// 步骤级缺省：不覆盖
+	if got := StepShouldOverwrite(ExecStep{}, StepUploadFile{}); got {
+		t.Errorf("步骤级默认应为不覆盖")
+	}
+	// 步骤级 overwrite=true
+	if got := StepShouldOverwrite(ExecStep{Overwrite: boolPtr(true)}, StepUploadFile{}); !got {
+		t.Errorf("步骤级 overwrite=true 应覆盖")
+	}
+	// 单文件 overwrite 优先于步骤级
+	if got := StepShouldOverwrite(ExecStep{Overwrite: boolPtr(true)}, StepUploadFile{Overwrite: boolPtr(false)}); got {
+		t.Errorf("单文件 overwrite=false 应覆盖步骤级 true")
+	}
+	if got := StepShouldOverwrite(ExecStep{Overwrite: boolPtr(false)}, StepUploadFile{Overwrite: boolPtr(true)}); !got {
+		t.Errorf("单文件 overwrite=true 应覆盖步骤级 false")
+	}
+}
+
+func TestStepMkdirsEnabled(t *testing.T) {
+	if got := StepMkdirsEnabled(ExecStep{}); !got {
+		t.Errorf("未配置 mkdirs 应默认 true")
+	}
+	if got := StepMkdirsEnabled(ExecStep{Mkdirs: boolPtr(false)}); got {
+		t.Errorf("mkdirs=false 应返回 false")
 	}
 }
 
@@ -111,112 +94,59 @@ func TestShellQuote(t *testing.T) {
 	}
 }
 
-func TestFirstUploadError(t *testing.T) {
-	if got := firstUploadError(nil); got != nil {
-		t.Errorf("nil 应返回 nil")
+func TestUploadResultLine(t *testing.T) {
+	if got := uploadResultLine(&UploadResult{State: "success", Local: "a", Remote: "/x/a", Mode: "0644"}); got != "✓ a -> /x/a (0644)" {
+		t.Errorf("新建上传行错误: %q", got)
 	}
-	ups := []*UploadResult{{State: "success"}, {State: "skipped"}}
-	if got := firstUploadError(ups); got != nil {
-		t.Errorf("无 error 应返回 nil: %+v", got)
+	if got := uploadResultLine(&UploadResult{State: "success", Overwritten: true, Local: "a", Remote: "/x/a", Mode: "0644"}); got != "✓ 已覆盖 a -> /x/a (0644)" {
+		t.Errorf("覆盖上传行错误: %q", got)
 	}
-	ups = append(ups, &UploadResult{State: "error", Error: "boom"})
-	if got := firstUploadError(ups); got == nil || got.Error != "boom" {
-		t.Errorf("应返回第一个 error: %+v", got)
+	if got := uploadResultLine(&UploadResult{State: "skipped", Local: "a", Remote: "/x/a", Error: "已存在"}); !strings.Contains(got, "跳过") {
+		t.Errorf("跳过行错误: %q", got)
 	}
-}
-
-func TestUploadStr(t *testing.T) {
-	if got := uploadStr(&VM{}); got != "—" {
-		t.Errorf("未配置上传应显示 —: %q", got)
-	}
-	if got := uploadStr(&VM{Uploads: []*UploadResult{{State: "success"}, {State: "success"}}}); got != "✓ 2/2" {
-		t.Errorf("全部成功: %q", got)
-	}
-	if got := uploadStr(&VM{Uploads: []*UploadResult{{State: "success"}, {State: "skipped"}}}); got != "✓ 1/2(跳过1)" {
-		t.Errorf("含跳过: %q", got)
-	}
-	if got := uploadStr(&VM{Uploads: []*UploadResult{{State: "success"}, {State: "error"}}}); got != "✗ 1失败" {
-		t.Errorf("含失败: %q", got)
+	if got := uploadResultLine(&UploadResult{State: "error", Local: "a", Remote: "/x/a", Error: "boom"}); !strings.Contains(got, "失败") {
+		t.Errorf("失败行错误: %q", got)
 	}
 }
 
-func TestUploadResultLabel(t *testing.T) {
-	if got := uploadResultLabel(&UploadResult{State: "success"}); got != "上传成功" {
-		t.Errorf("新建应标上传成功: %q", got)
-	}
-	if got := uploadResultLabel(&UploadResult{State: "success", Overwritten: true}); got != "已覆盖" {
-		t.Errorf("覆盖应标已覆盖: %q", got)
-	}
-	if got := uploadResultLabel(&UploadResult{State: "skipped"}); got != "跳过(已存在)" {
-		t.Errorf("跳过标签错误: %q", got)
-	}
-	if got := uploadResultLabel(&UploadResult{State: "error"}); got != "失败" {
-		t.Errorf("失败标签错误: %q", got)
-	}
-}
+// expandLocalFiles：文件 -> 单条；文件夹 -> 递归展开为 remote/<相对路径>
+func TestExpandLocalFiles(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "sub"), 0o755)
+	os.WriteFile(filepath.Join(dir, "a.sh"), []byte("x"), 0o644)
+	os.WriteFile(filepath.Join(dir, "sub", "b.conf"), []byte("y"), 0o644)
 
-func TestLoadConfigUploadValidation(t *testing.T) {
-	base := `
-endpoint: "https://127.0.0.1:30990"
-accessKeyId: "ak"
-accessKeySecret: "sk"
-regionId: "cn-beijing"
-project:
-  names: ["default"]
-ssh:
-  upload:
-`
-	// remote 不是绝对路径 -> 报错
-	yaml := base + `    - local: "a.sh"
-      remote: "opt/a.sh"
-`
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	os.WriteFile(path, []byte(yaml), 0o644)
-	if _, err := loadConfig(path); err == nil || !strings.Contains(err.Error(), "绝对路径") {
-		t.Errorf("relative remote 应报错: %v", err)
-	}
-
-	// mode 非法 -> 报错
-	yaml = base + `    - local: "a.sh"
-      remote: "/opt/a.sh"
-      mode: "888"
-`
-	os.WriteFile(path, []byte(yaml), 0o644)
-	if _, err := loadConfig(path); err == nil || !strings.Contains(err.Error(), "mode") {
-		t.Errorf("非法 mode 应报错: %v", err)
-	}
-
-	// remoteWorkDir 不是绝对路径 -> 报错
-	yaml = base + `    - local: "a.sh"
-      remote: "/opt/a.sh"
-  remoteWorkDir: "opt"
-`
-	os.WriteFile(path, []byte(yaml), 0o644)
-	if _, err := loadConfig(path); err == nil || !strings.Contains(err.Error(), "remoteWorkDir") {
-		t.Errorf("relative remoteWorkDir 应报错: %v", err)
-	}
-
-	// 合法配置 -> 通过
-	yaml = base + `    - local: "a.sh"
-      remote: "/opt/a.sh"
-      mode: "0755"
-      overwrite: true
-    - local: "b.conf"
-      remote: "/etc/b.conf"
-`
-	os.WriteFile(path, []byte(yaml), 0o644)
-	cfg, err := loadConfig(path)
+	// 文件
+	pairs, err := expandLocalFiles(StepUploadFile{Local: filepath.Join(dir, "a.sh"), Remote: "/opt/app/a.sh"})
 	if err != nil {
-		t.Fatalf("合法配置不应报错: %v", err)
+		t.Fatalf("文件展开失败: %v", err)
 	}
-	if len(cfg.SSH.Upload) != 2 {
-		t.Fatalf("upload 数量错误: %d", len(cfg.SSH.Upload))
+	if len(pairs) != 1 || pairs[0].remote != "/opt/app/a.sh" {
+		t.Errorf("文件应单条精确映射: %+v", pairs)
 	}
-	if !cfg.UploadShouldOverwrite(cfg.SSH.Upload[0]) {
-		t.Errorf("单文件 overwrite=true 应生效")
+
+	// 文件夹
+	pairs, err = expandLocalFiles(StepUploadFile{Local: dir, Remote: "/opt/app"})
+	if err != nil {
+		t.Fatalf("文件夹展开失败: %v", err)
 	}
-	if cfg.UploadShouldOverwrite(cfg.SSH.Upload[1]) {
-		t.Errorf("缺省应不覆盖")
+	got := map[string]string{}
+	for _, p := range pairs {
+		got[p.remote] = p.local
+	}
+	if len(got) != 2 {
+		t.Errorf("应展开2个文件: %+v", got)
+	}
+	if got["/opt/app/a.sh"] == "" {
+		t.Errorf("缺少 /opt/app/a.sh: %+v", got)
+	}
+	if got["/opt/app/sub/b.conf"] == "" {
+		t.Errorf("缺少 /opt/app/sub/b.conf（保持目录结构）: %+v", got)
+	}
+
+	// 本地不存在 -> 报错
+	if _, err := expandLocalFiles(StepUploadFile{Local: filepath.Join(dir, "nope"), Remote: "/opt/x"}); err == nil {
+		t.Errorf("本地路径不存在应报错")
 	}
 }
 
@@ -225,11 +155,14 @@ ssh:
 // inProcUploadCfg 构造指向带 SFTP 支持的进程内 SSH 服务器的配置
 func inProcUploadCfg(addr string) *Config {
 	cfg := inProcSSHCfg(addr)
-	cfg.SSH.ScriptTimeout = "5s"
+	cfg.ExecList = []ExecStep{
+		{Name: "上传", Type: "upload"},
+		{Name: "脚本", Type: "script", Target: "remote", Timeout: "5s"},
+	}
 	return cfg
 }
 
-// 上传到指定位置（自动创建父目录），可校验内容与权限
+// 上传到指定位置（自动创建父目录），可校验内容与权限；随后脚本在 remoteWorkDir 下执行
 func TestUploadInProc(t *testing.T) {
 	remoteRoot := t.TempDir()
 	addr := startInProcSSHServerOpts(t, "Test@12345", inProcOpts{SFTPDir: remoteRoot})
@@ -238,21 +171,23 @@ func TestUploadInProc(t *testing.T) {
 	local := filepath.Join(t.TempDir(), "deploy.sh")
 	os.WriteFile(local, []byte("#!/bin/bash\necho hello-upload\n"), 0o644)
 	remote := filepath.Join(remoteRoot, "opt/myapp/deploy.sh")
-	cfg.SSH.Upload = []UploadFile{
-		{Local: local, Remote: remote, Mode: "0755"},
-	}
-	cfg.SSH.Script = "bash deploy.sh"
-	cfg.SSH.RemoteWorkDir = filepath.Join(remoteRoot, "opt/myapp")
+	cfg.ExecList[0].Files = []StepUploadFile{{Local: local, Remote: remote, Mode: "0755"}}
+	cfg.ExecList[1].Script = "bash deploy.sh"
+	cfg.ExecList[1].RemoteWorkDir = filepath.Join(remoteRoot, "opt/myapp")
 
-	_, _, uploads, script, err := trySSH(cfg, "127.0.0.1", "Test@12345")
+	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
 	if err != nil {
 		t.Fatalf("trySSH 失败: %v", err)
 	}
-	if len(uploads) != 1 || uploads[0].State != "success" {
-		t.Fatalf("上传应成功: %+v", uploads)
+	up := steps[0]
+	if up == nil || up.State != "success" {
+		t.Fatalf("上传应成功: %+v", up)
 	}
-	if uploads[0].Overwritten {
-		t.Errorf("首次上传不应标记为覆盖: %+v", uploads[0])
+	if !strings.Contains(up.Output, "hello-upload") && !strings.Contains(up.Output, "deploy.sh") {
+		t.Errorf("上传输出应含文件信息: %q", up.Output)
+	}
+	if strings.Contains(up.Output, "已覆盖") {
+		t.Errorf("首次上传不应标记为覆盖: %q", up.Output)
 	}
 
 	// 远端文件内容与权限
@@ -272,11 +207,12 @@ func TestUploadInProc(t *testing.T) {
 	}
 
 	// remoteWorkDir 生效：脚本在 opt/myapp 下执行 bash deploy.sh
-	if script == nil || !script.OK || script.State != "success" {
-		t.Fatalf("脚本应在上传目录执行成功: %+v", script)
+	scr := steps[1]
+	if scr == nil || scr.State != "success" {
+		t.Fatalf("脚本应在上传目录执行成功: %+v", scr)
 	}
-	if !strings.Contains(script.Output, "hello-upload") {
-		t.Errorf("脚本输出缺失: %q", script.Output)
+	if !strings.Contains(scr.Output, "hello-upload") {
+		t.Errorf("脚本输出缺失: %q", scr.Output)
 	}
 }
 
@@ -295,13 +231,13 @@ func TestUploadOverwriteInProc(t *testing.T) {
 	os.WriteFile(remoteFile, []byte("OLD-CONTENT\n"), 0o644)
 
 	// 1. 默认不覆盖：跳过，远端内容保持旧值
-	cfg.SSH.Upload = []UploadFile{{Local: local, Remote: "opt/deploy.sh"}}
-	_, _, uploads, _, err := trySSH(cfg, "127.0.0.1", "Test@12345")
+	cfg.ExecList[0].Files = []StepUploadFile{{Local: local, Remote: remoteFile}}
+	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
 	if err != nil {
 		t.Fatalf("trySSH 失败: %v", err)
 	}
-	if len(uploads) != 1 || uploads[0].State != "skipped" {
-		t.Fatalf("同名已存在且未开启覆盖应跳过: %+v", uploads)
+	if steps[0].State != "success" || !strings.Contains(steps[0].Output, "跳过") {
+		t.Fatalf("同名已存在且未开启覆盖应跳过: %+v", steps[0])
 	}
 	data, _ := os.ReadFile(remoteFile)
 	if !strings.Contains(string(data), "OLD-CONTENT") {
@@ -309,50 +245,71 @@ func TestUploadOverwriteInProc(t *testing.T) {
 	}
 
 	// 2. 单文件 overwrite=true：覆盖，内容替换为新值
-	cfg.SSH.Upload = []UploadFile{{Local: local, Remote: "opt/deploy.sh", Overwrite: boolPtr(true)}}
-	_, _, uploads, _, err = trySSH(cfg, "127.0.0.1", "Test@12345")
+	cfg.ExecList[0].Files = []StepUploadFile{{Local: local, Remote: remoteFile, Overwrite: boolPtr(true)}}
+	_, _, steps, err = trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
 	if err != nil {
 		t.Fatalf("trySSH 失败: %v", err)
 	}
-	if len(uploads) != 1 || uploads[0].State != "success" || !uploads[0].Overwritten {
-		t.Fatalf("overwrite=true 应覆盖成功: %+v", uploads)
+	if steps[0].State != "success" || !strings.Contains(steps[0].Output, "已覆盖") {
+		t.Fatalf("overwrite=true 应覆盖成功: %+v", steps[0])
 	}
 	data, _ = os.ReadFile(remoteFile)
 	if !strings.Contains(string(data), "NEW-CONTENT") {
 		t.Errorf("覆盖后内容应更新: %q", data)
 	}
 
-	// 3. 全局 uploadOverwrite=true 且单文件缺省：覆盖
+	// 3. 步骤级 overwrite=true 且单文件缺省：覆盖
 	os.WriteFile(remoteFile, []byte("OLD-AGAIN\n"), 0o644)
-	cfg.SSH.UploadOverwrite = true
-	cfg.SSH.Upload = []UploadFile{{Local: local, Remote: "opt/deploy.sh"}}
-	_, _, uploads, _, err = trySSH(cfg, "127.0.0.1", "Test@12345")
+	cfg.ExecList[0].Overwrite = boolPtr(true)
+	cfg.ExecList[0].Files = []StepUploadFile{{Local: local, Remote: remoteFile}}
+	_, _, steps, err = trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
 	if err != nil {
 		t.Fatalf("trySSH 失败: %v", err)
 	}
-	if len(uploads) != 1 || uploads[0].State != "success" || !uploads[0].Overwritten {
-		t.Fatalf("全局覆盖应生效: %+v", uploads)
+	if steps[0].State != "success" || !strings.Contains(steps[0].Output, "已覆盖") {
+		t.Fatalf("步骤级覆盖应生效: %+v", steps[0])
 	}
 }
 
-// 上传失败（本地文件缺失）时脚本不执行，标记 error
+// 上传失败（本地文件缺失）时，onError=stop 的后续脚本步骤不执行（skipped）
 func TestUploadFailBlocksScriptInProc(t *testing.T) {
 	remoteRoot := t.TempDir()
 	addr := startInProcSSHServerOpts(t, "Test@12345", inProcOpts{SFTPDir: remoteRoot})
 	cfg := inProcUploadCfg(addr)
 
-	cfg.SSH.Upload = []UploadFile{{Local: filepath.Join(t.TempDir(), "not-exist.sh"), Remote: "opt/x.sh"}}
-	cfg.SSH.Script = "echo should-not-run"
+	cfg.ExecList[0].Files = []StepUploadFile{{Local: filepath.Join(t.TempDir(), "not-exist.sh"), Remote: filepath.Join(remoteRoot, "opt/x.sh")}}
+	cfg.ExecList[1].Script = "echo should-not-run"
 
-	_, _, uploads, script, err := trySSH(cfg, "127.0.0.1", "Test@12345")
+	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
 	if err != nil {
 		t.Fatalf("trySSH 失败: %v", err)
 	}
-	if len(uploads) != 1 || uploads[0].State != "error" {
-		t.Fatalf("上传应标记失败: %+v", uploads)
+	if steps[0].State != "error" {
+		t.Fatalf("上传应标记失败: %+v", steps[0])
 	}
-	if script == nil || script.State != "error" || !strings.Contains(script.Error, "上传失败") {
-		t.Fatalf("上传失败时脚本应标记 error 且不执行: %+v", script)
+	if steps[1].State != "skipped" {
+		t.Fatalf("上传失败时后续脚本步骤应不执行: %+v", steps[1])
+	}
+}
+
+// 上传失败但 onError=continue：后续脚本步骤照常执行
+func TestUploadFailContinueInProc(t *testing.T) {
+	remoteRoot := t.TempDir()
+	addr := startInProcSSHServerOpts(t, "Test@12345", inProcOpts{SFTPDir: remoteRoot})
+	cfg := inProcUploadCfg(addr)
+	cfg.ExecList[0].OnError = "continue"
+	cfg.ExecList[0].Files = []StepUploadFile{{Local: filepath.Join(t.TempDir(), "not-exist.sh"), Remote: filepath.Join(remoteRoot, "opt/x.sh")}}
+	cfg.ExecList[1].Script = "echo still-run"
+
+	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
+	if err != nil {
+		t.Fatalf("trySSH 失败: %v", err)
+	}
+	if steps[0].State != "error" {
+		t.Fatalf("上传应标记失败: %+v", steps[0])
+	}
+	if steps[1].State != "success" {
+		t.Fatalf("onError=continue 时脚本应执行: %+v", steps[1])
 	}
 }
 
@@ -360,22 +317,21 @@ func TestUploadFailBlocksScriptInProc(t *testing.T) {
 func TestUploadWithoutScriptInProc(t *testing.T) {
 	remoteRoot := t.TempDir()
 	addr := startInProcSSHServerOpts(t, "Test@12345", inProcOpts{SFTPDir: remoteRoot})
-	cfg := inProcUploadCfg(addr)
+	cfg := inProcSSHCfg(addr)
+	cfg.ExecList = []ExecStep{
+		{Name: "上传", Type: "upload", Files: []StepUploadFile{{Local: func() string {
+			p := filepath.Join(t.TempDir(), "app.conf")
+			os.WriteFile(p, []byte("key=value\n"), 0o644)
+			return p
+		}(), Remote: filepath.Join(remoteRoot, "etc/app.conf")}}},
+	}
 
-	dir := t.TempDir()
-	local := filepath.Join(dir, "app.conf")
-	os.WriteFile(local, []byte("key=value\n"), 0o644)
-	cfg.SSH.Upload = []UploadFile{{Local: local, Remote: "etc/app.conf"}}
-
-	_, _, uploads, script, err := trySSH(cfg, "127.0.0.1", "Test@12345")
+	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
 	if err != nil {
 		t.Fatalf("trySSH 失败: %v", err)
 	}
-	if len(uploads) != 1 || uploads[0].State != "success" {
-		t.Fatalf("上传应成功: %+v", uploads)
-	}
-	if script != nil {
-		t.Errorf("未配置脚本不应有脚本结果: %+v", script)
+	if len(steps) != 1 || steps[0].State != "success" {
+		t.Fatalf("上传应成功: %+v", steps)
 	}
 	data, err := os.ReadFile(filepath.Join(remoteRoot, "etc/app.conf"))
 	if err != nil {
@@ -383,5 +339,54 @@ func TestUploadWithoutScriptInProc(t *testing.T) {
 	}
 	if string(data) != "key=value\n" {
 		t.Errorf("远端内容错误: %q", data)
+	}
+}
+
+// 文件夹递归上传：保持目录结构，远端目标精确到文件
+func TestUploadFolderInProc(t *testing.T) {
+	remoteRoot := t.TempDir()
+	addr := startInProcSSHServerOpts(t, "Test@12345", inProcOpts{SFTPDir: remoteRoot})
+	cfg := inProcSSHCfg(addr)
+
+	localDir := filepath.Join(t.TempDir(), "dist")
+	os.MkdirAll(filepath.Join(localDir, "conf", "nested"), 0o755)
+	os.WriteFile(filepath.Join(localDir, "app.sh"), []byte("#!/bin/bash\necho app\n"), 0o644)
+	os.WriteFile(filepath.Join(localDir, "conf", "a.conf"), []byte("a=1\n"), 0o644)
+	os.WriteFile(filepath.Join(localDir, "conf", "nested", "b.json"), []byte("{}\n"), 0o644)
+
+	cfg.ExecList = []ExecStep{
+		{Name: "上传目录", Type: "upload", Files: []StepUploadFile{
+			{Local: localDir, Remote: filepath.Join(remoteRoot, "opt/app"), Mode: "0644"},
+		}},
+	}
+
+	_, _, steps, err := trySSH(cfg, "127.0.0.1", "Test@12345", nil, false)
+	if err != nil {
+		t.Fatalf("trySSH 失败: %v", err)
+	}
+	if steps[0].State != "success" {
+		t.Fatalf("文件夹上传应成功: %+v", steps[0])
+	}
+	for _, want := range []string{
+		"/opt/app/app.sh",
+		"/opt/app/conf/a.conf",
+		"/opt/app/conf/nested/b.json",
+	} {
+		p := filepath.Join(remoteRoot, "opt", "app", strings.TrimPrefix(want, "/opt/app/"))
+		data, err := os.ReadFile(p)
+		if err != nil {
+			t.Errorf("远端文件缺失 %s: %v", want, err)
+			continue
+		}
+		if len(data) == 0 {
+			t.Errorf("远端文件为空: %s", want)
+		}
+		if !strings.Contains(steps[0].Output, want) {
+			t.Errorf("上传输出应包含精确远端路径 %s: %q", want, steps[0].Output)
+		}
+	}
+	// 输出中不应有目录本身作为文件（“conf ->”会误匹配 “a.conf ->”，用带目录分隔符的精确前缀判断）
+	if strings.Contains(steps[0].Output, filepath.Join("dist", "conf")+" ->") || strings.Contains(steps[0].Output, filepath.Join("conf", "nested")+" ->") {
+		t.Errorf("不应把目录当文件上传: %q", steps[0].Output)
 	}
 }

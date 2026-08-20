@@ -2,14 +2,17 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,11 +24,13 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// statusCommand 登录成功后采集服务器运行状态的命令（输出用 ===标记=== 分段，便于解析）
+// statusCommand 采集服务器运行状态的命令（输出用 ===标记=== 分段，便于解析）
 const statusCommand = `echo "===OS==="; . /etc/os-release 2>/dev/null; echo "$PRETTY_NAME"; echo "===KERNEL==="; uname -r; echo "===UPTIME==="; uptime; echo "===CPU==="; top -bn1 2>/dev/null | grep -m1 -E '^%Cpu|Cpu\\(s\\)'; echo "===MEM==="; free -m 2>/dev/null; echo "===DISK==="; df -h -x tmpfs -x devtmpfs 2>/dev/null`
 
-// runSSHTests 并发执行 SSH 登录测试与运行状态采集，结果写回 vm.SSHResult/vm.ServerStatus，进度输出到 stderr
-func runSSHTests(cfg *Config, vms []*VM) {
+// runSSHTests 并发执行 SSH 登录测试与流水线步骤，结果写回 vm，进度输出到 stderr。
+// onceResults 是阶段一（本地 once 步骤）的结果，按下标与 cfg.EffectiveSteps() 对齐（非 once 步骤为 nil）；
+// globalStopped 表示阶段一因某 once 步骤失败（onError=stop）已全局终止。
+func runSSHTests(cfg *Config, vms []*VM, onceResults []*ExecStepResult, globalStopped bool) {
 	total := len(vms)
 	if total == 0 {
 		return
@@ -42,21 +47,20 @@ func runSSHTests(cfg *Config, vms []*VM) {
 		go func() {
 			defer wg.Done()
 			for vm := range jobs {
-				result, status, services, uploads, script := testOne(cfg, vm)
+				result, status, services, steps := testOne(cfg, vm, onceResults, globalStopped)
 				vm.SSHResult = result
 				vm.ServerStatus = status
 				vm.Services = services
-				vm.Uploads = uploads
-				vm.Script = script
-				if len(uploads) > 0 {
-					printUploadResults(vm, uploads) // 上传失败/跳过：stderr 回显现场
-				}
-				if script != nil {
-					if !script.OK && script.State != "error" {
-						printScriptFailure(vm, script) // 失败/超时/会话中断：stderr 回显现场
+				vm.ExecSteps = steps
+				for _, s := range steps {
+					if s == nil {
+						continue
 					}
-					if scriptDir != "" {
-						writeScriptLog(scriptDir, vm, script)
+					if !stepOK(s) && s.State != "skipped" {
+						printStepFailure(vm, s) // 失败/超时/会话中断：stderr 回显现场
+					}
+					if scriptDir != "" && s.Type == "script" {
+						writeScriptLog(scriptDir, vm, s)
 					}
 				}
 				n := atomic.AddInt64(&done, 1)
@@ -72,24 +76,25 @@ func runSSHTests(cfg *Config, vms []*VM) {
 	fmt.Fprintln(os.Stderr)
 }
 
-// testOne 对单台虚拟机做登录测试，成功且开启采集时返回服务器运行状态、服务状态、上传结果与脚本执行结果
-func testOne(cfg *Config, vm *VM) (string, *ServerStatus, []ServiceStatus, []*UploadResult, *ScriptResult) {
+// testOne 对单台虚拟机做登录测试，成功后按流水线（exec-list）依次执行各步骤。
+// 返回 SSH 登录结果、status/services 步骤采集的结构化数据与该台机器的步骤结果列表。
+func testOne(cfg *Config, vm *VM, onceResults []*ExecStepResult, globalStopped bool) (string, *ServerStatus, []ServiceStatus, []*ExecStepResult) {
 	if vm.Password == "" {
-		return "无密码(GetEcsPassword未返回)", nil, nil, nil, nil
+		return "无密码(GetEcsPassword未返回)", nil, nil, nil
 	}
 	ips := candidateIPs(cfg, vm)
 	if len(ips) == 0 {
-		return "无可用IP", nil, nil, nil, nil
+		return "无可用IP", nil, nil, nil
 	}
 	var lastErr error
 	for _, ip := range ips {
-		status, services, uploads, script, err := trySSH(cfg, ip, vm.Password)
+		status, services, steps, err := trySSH(cfg, ip, vm.Password, onceResults, globalStopped)
 		if err == nil {
-			return "✓ 成功 (" + ip + ")", status, services, uploads, script
+			return "✓ 成功 (" + ip + ")", status, services, steps
 		}
 		lastErr = err
 	}
-	return "✗ " + classifySSHErr(lastErr), nil, nil, nil, nil
+	return "✗ " + classifySSHErr(lastErr), nil, nil, nil
 }
 
 // candidateIPs 按配置选择测试用的 IP
@@ -117,8 +122,9 @@ func candidateIPs(cfg *Config, vm *VM) []string {
 	}
 }
 
-// trySSH 用 root+密码 连接，执行验证命令；成功后按需上传文件、执行脚本、采集状态与服务检查
-func trySSH(cfg *Config, ip, password string) (*ServerStatus, []ServiceStatus, []*UploadResult, *ScriptResult, error) {
+// trySSH 用 root+密码 连接并验证；成功后按流水线顺序执行各步骤（本地 once 步骤复用阶段一结果）。
+// 返回 status/services 步骤采集的结构化数据与该台机器的步骤结果列表。
+func trySSH(cfg *Config, ip, password string, onceResults []*ExecStepResult, globalStopped bool) (*ServerStatus, []ServiceStatus, []*ExecStepResult, error) {
 	addr := net.JoinHostPort(ip, strconv.Itoa(cfg.SSH.Port))
 	timeout := cfg.SSHSingleTimeout()
 
@@ -131,13 +137,13 @@ func trySSH(cfg *Config, ip, password string) (*ServerStatus, []ServiceStatus, [
 
 	conn, err := net.DialTimeout("tcp", addr, timeout)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, err
 	}
 	defer conn.Close()
 
 	sshConn, chans, reqs, err := ssh.NewClientConn(conn, addr, clientCfg)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, err
 	}
 	defer sshConn.Close()
 
@@ -146,66 +152,226 @@ func trySSH(cfg *Config, ip, password string) (*ServerStatus, []ServiceStatus, [
 
 	session, err := client.NewSession()
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, err
 	}
 	defer session.Close()
 
 	if _, err := session.Output(cfg.SSH.VerifyCommand); err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, err
 	}
 
-	// 1. 上传文件（登录成功后、执行脚本前）
-	var uploads []*UploadResult
-	if cfg.UploadEnabled() {
-		uploads = uploadFiles(client, cfg)
-	}
-
-	// 2. 执行脚本
-	var script *ScriptResult
-	if cfg.ScriptEnabled() {
-		if fail := firstUploadError(uploads); fail != nil {
-			// 上传失败时脚本不执行，避免误跑远端旧文件
-			script = &ScriptResult{ExitCode: -1, State: "error", Error: "上传失败，脚本未执行: " + fail.Error}
-		} else {
-			script = runScript(client, cfg)
-		}
-	}
-
-	// 3. 服务器运行状态 / 服务状态采集
-	var status *ServerStatus
-	if cfg.CheckStatusEnabled() {
-		status = collectServerStatus(client)
-	}
-	var services []ServiceStatus
-	if cfg.CheckServicesEnabled() {
-		services = collectServiceStatus(client, cfg.ServiceNames())
-	}
-	return status, services, uploads, script, nil
+	// 流水线执行
+	status, services, steps := runPipeline(cfg, client, onceResults, globalStopped)
+	return status, services, steps, nil
 }
 
-// ---------- 文件上传（SFTP） ----------
+// ---------- 流水线执行 ----------
 
-// uploadFiles 通过 SFTP 把本地文件传到远端指定路径（可覆盖同名文件），返回每文件结果。
-// 纯 Go 实现（github.com/pkg/sftp），兼容 CGO_ENABLED=0 静态编译。
-func uploadFiles(client *ssh.Client, cfg *Config) []*UploadResult {
+// runPipelineOnce 阶段一：串行执行所有 target=local 且 run=once 的步骤（只跑一次）。
+// 返回与 cfg.EffectiveSteps() 按下标对齐的结果切片（非 once 本地步骤为 nil），
+// 以及是否因某步骤失败(onError=stop)导致全局终止。
+func runPipelineOnce(cfg *Config) ([]*ExecStepResult, bool) {
+	steps := cfg.EffectiveSteps()
+	results := make([]*ExecStepResult, len(steps))
+	for i, step := range steps {
+		if StepTarget(step) != "local" || StepRunMode(step) != "once" {
+			continue
+		}
+		res := execStepLocal(step, i)
+		results[i] = res
+		if !stepOK(res) && StepOnError(step) == "stop" {
+			return results, true
+		}
+	}
+	return results, false
+}
+
+// runPipeline 对单台已登录的服务器按顺序执行流水线步骤。
+// 本地 once 步骤直接复用阶段一结果；其余步骤在本机或远端执行。
+// 任一步骤失败且 onError=stop 时，该台后续步骤标记 skipped 不再执行。
+func runPipeline(cfg *Config, client *ssh.Client, onceResults []*ExecStepResult, globalStopped bool) (*ServerStatus, []ServiceStatus, []*ExecStepResult) {
+	steps := cfg.EffectiveSteps()
+	results := make([]*ExecStepResult, 0, len(steps))
+	var status *ServerStatus
+	var services []ServiceStatus
+
+	stopped := globalStopped
+	for i, step := range steps {
+		name := StepName(step, i)
+		if stopped {
+			// 全局/上游终止：本地 once 步骤已执行过则复用其结果（如实展示失败现场），其余步骤标记未执行
+			if StepTarget(step) == "local" && StepRunMode(step) == "once" && i < len(onceResults) && onceResults[i] != nil {
+				results = append(results, onceResults[i])
+			} else {
+				results = append(results, skippedStepResult(step, name, "上游步骤失败，流水线已终止，本步骤未执行"))
+			}
+			continue
+		}
+		// 本地 once 步骤：复用阶段一结果（按步骤下标对齐）
+		if StepTarget(step) == "local" && StepRunMode(step) == "once" {
+			if i < len(onceResults) && onceResults[i] != nil {
+				results = append(results, onceResults[i])
+				if !stepOK(onceResults[i]) && StepOnError(step) == "stop" {
+					stopped = true
+				}
+				continue
+			}
+			// 阶段一未执行到（理论不会发生），兜底本机执行
+			res := execStepLocal(step, i)
+			results = append(results, res)
+			if !stepOK(res) && StepOnError(step) == "stop" {
+				stopped = true
+			}
+			continue
+		}
+
+		var res *ExecStepResult
+		switch step.Type {
+		case "upload":
+			res = execUploadStep(client, step, name)
+		case "script":
+			if StepTarget(step) == "local" {
+				res = runLocalScript(step, name)
+			} else {
+				res = runRemoteScript(client, step, name)
+			}
+		case "services":
+			var svcs []ServiceStatus
+			res, svcs = execServicesStep(client, step, name)
+			if svcs != nil {
+				services = svcs
+			}
+		case "status":
+			var st *ServerStatus
+			res, st = execStatusStep(client, step, name)
+			if st != nil {
+				status = st
+			}
+		default:
+			res = &ExecStepResult{Name: name, Type: step.Type, Target: StepTarget(step), ExitCode: -1,
+				State: "error", Error: "未知步骤类型: " + step.Type}
+		}
+		results = append(results, res)
+		if !stepOK(res) && StepOnError(step) == "stop" {
+			stopped = true
+		}
+	}
+	return status, services, results
+}
+
+// execStepLocal 在本机执行单个步骤（当前仅 script 支持 target=local）
+func execStepLocal(step ExecStep, idx int) *ExecStepResult {
+	return runLocalScript(step, StepName(step, idx))
+}
+
+// stepOK 步骤结果是否成功（success 或跳过 skipped 均视为不阻断流水线）
+func stepOK(res *ExecStepResult) bool {
+	return res != nil && (res.State == "success" || res.State == "skipped")
+}
+
+// skippedStepResult 构造一个未执行（被跳过）的步骤结果
+func skippedStepResult(step ExecStep, name, reason string) *ExecStepResult {
+	return &ExecStepResult{Name: name, Type: step.Type, Target: StepTarget(step),
+		State: "skipped", Error: reason, ExitCode: -1}
+}
+
+// stepDuration 步骤耗时
+func stepDuration(start time.Time) string {
+	return time.Since(start).Truncate(time.Millisecond).String()
+}
+
+// ---------- upload 模块（SFTP 传输文件/文件夹，远端精确到文件） ----------
+
+// execUploadStep 通过 SFTP 上传步骤配置的所有文件/文件夹，返回汇总结果。
+// local 为文件时 remote 是精确远端文件路径；local 为文件夹时递归展开，
+// 每个文件映射为 remote/<相对路径>（保持目录结构，远端目标精确到文件）。
+func execUploadStep(client *ssh.Client, step ExecStep, name string) *ExecStepResult {
+	start := time.Now()
+	res := &ExecStepResult{Name: name, Type: "upload", Target: "remote", ExitCode: -1}
+
 	sftpClient, err := sftp.NewClient(client)
 	if err != nil {
-		return []*UploadResult{{State: "error", Error: "创建SFTP会话失败: " + err.Error()}}
+		res.State = "error"
+		res.Error = "创建SFTP会话失败: " + err.Error()
+		res.Duration = stepDuration(start)
+		return res
 	}
 	defer sftpClient.Close()
 
-	results := make([]*UploadResult, 0, len(cfg.SSH.Upload))
-	for _, f := range cfg.SSH.Upload {
-		results = append(results, uploadOne(sftpClient, f, cfg))
+	var lines []string
+	fail := 0
+	for _, f := range step.Files {
+		pairs, err := expandLocalFiles(f)
+		if err != nil {
+			fail++
+			lines = append(lines, "失败: "+f.Local+" -> "+f.Remote+"（"+err.Error()+"）")
+			continue
+		}
+		for _, p := range pairs {
+			u := uploadOne(sftpClient, step, f, p.local, p.remote)
+			lines = append(lines, uploadResultLine(u))
+			if u.State == "error" {
+				fail++
+			}
+		}
 	}
-	return results
+	res.Output = strings.Join(lines, "\n")
+	res.Duration = stepDuration(start)
+	if fail > 0 {
+		res.State = "error"
+		res.Error = fmt.Sprintf("%d 个文件上传失败", fail)
+	} else {
+		res.State = "success"
+	}
+	return res
+}
+
+// localRemotePair 一条展开后的上传任务：本地文件 -> 远端精确文件路径
+type localRemotePair struct {
+	local  string
+	remote string
+}
+
+// expandLocalFiles 展开上传规则：local 为文件 -> 单条；local 为文件夹 -> 递归展开为
+// remote/<相对路径> 列表（远端目标精确到文件，父目录自动创建）。
+func expandLocalFiles(f StepUploadFile) ([]localRemotePair, error) {
+	info, err := os.Stat(f.Local)
+	if err != nil {
+		return nil, fmt.Errorf("本地路径不存在: %w", err)
+	}
+	if !info.IsDir() {
+		return []localRemotePair{{local: f.Local, remote: f.Remote}}, nil
+	}
+	var pairs []localRemotePair
+	base := filepath.Clean(f.Local)
+	err = filepath.Walk(base, func(p string, fi os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if fi.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(base, p)
+		if err != nil {
+			return err
+		}
+		pairs = append(pairs, localRemotePair{
+			local:  p,
+			remote: path.Join(f.Remote, filepath.ToSlash(rel)),
+		})
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("遍历文件夹失败: %w", err)
+	}
+	return pairs, nil
 }
 
 // uploadOne 上传单个文件：同名已存在且未开启覆盖 -> 跳过(skipped)；否则创建父目录、流式写入并设置权限。
-func uploadOne(sc *sftp.Client, f UploadFile, cfg *Config) *UploadResult {
-	res := &UploadResult{Local: f.Local, Remote: f.Remote}
+func uploadOne(sc *sftp.Client, step ExecStep, f StepUploadFile, localPath, remotePath string) *UploadResult {
+	res := &UploadResult{Local: localPath, Remote: remotePath}
 
-	mode, err := cfg.UploadFileMode(f)
+	mode, err := StepFileMode(step, f)
 	if err != nil {
 		res.State = "error"
 		res.Error = err.Error()
@@ -215,16 +381,16 @@ func uploadOne(sc *sftp.Client, f UploadFile, cfg *Config) *UploadResult {
 
 	// 同名文件已存在且未开启覆盖：跳过（安全默认，避免误覆盖）
 	existed := false
-	if _, err := sc.Stat(f.Remote); err == nil {
+	if _, err := sc.Stat(remotePath); err == nil {
 		existed = true
 	}
-	if existed && !cfg.UploadShouldOverwrite(f) {
+	if existed && !StepShouldOverwrite(step, f) {
 		res.State = "skipped"
 		res.Error = "远端已存在同名文件，未开启覆盖，已跳过"
 		return res
 	}
 
-	local, err := os.Open(f.Local)
+	local, err := os.Open(localPath)
 	if err != nil {
 		res.State = "error"
 		res.Error = "打开本地文件失败: " + err.Error()
@@ -233,8 +399,8 @@ func uploadOne(sc *sftp.Client, f UploadFile, cfg *Config) *UploadResult {
 	defer local.Close()
 
 	// 远端父目录不存在时自动创建
-	if cfg.UploadMkdirsEnabled() {
-		if dir := path.Dir(f.Remote); dir != "." && dir != "/" {
+	if StepMkdirsEnabled(step) {
+		if dir := path.Dir(remotePath); dir != "." && dir != "/" {
 			if err := sc.MkdirAll(dir); err != nil {
 				res.State = "error"
 				res.Error = "创建远端目录失败: " + err.Error()
@@ -244,7 +410,7 @@ func uploadOne(sc *sftp.Client, f UploadFile, cfg *Config) *UploadResult {
 	}
 
 	// O_TRUNC 覆盖写入（支持二进制/大文件，io.Copy 流式传输）
-	remote, err := sc.OpenFile(f.Remote, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
+	remote, err := sc.OpenFile(remotePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
 	if err != nil {
 		res.State = "error"
 		res.Error = "打开远端文件失败: " + err.Error()
@@ -261,7 +427,7 @@ func uploadOne(sc *sftp.Client, f UploadFile, cfg *Config) *UploadResult {
 		res.Error = "关闭远端文件失败: " + err.Error()
 		return res
 	}
-	if err := sc.Chmod(f.Remote, mode); err != nil {
+	if err := sc.Chmod(remotePath, mode); err != nil {
 		res.State = "error"
 		res.Error = "设置远端权限失败: " + err.Error()
 		return res
@@ -272,34 +438,19 @@ func uploadOne(sc *sftp.Client, f UploadFile, cfg *Config) *UploadResult {
 	return res
 }
 
-// firstUploadError 返回上传结果中第一个 error 状态（无则返回 nil）
-func firstUploadError(uploads []*UploadResult) *UploadResult {
-	for _, u := range uploads {
-		if u != nil && u.State == "error" {
-			return u
+// uploadResultLine 单条上传结果的一行摘要（用于步骤 Output）
+func uploadResultLine(u *UploadResult) string {
+	switch u.State {
+	case "success":
+		if u.Overwritten {
+			return fmt.Sprintf("✓ 已覆盖 %s -> %s (%s)", u.Local, u.Remote, u.Mode)
 		}
+		return fmt.Sprintf("✓ %s -> %s (%s)", u.Local, u.Remote, u.Mode)
+	case "skipped":
+		return fmt.Sprintf("跳过: %s -> %s（%s）", u.Local, u.Remote, u.Error)
+	default:
+		return fmt.Sprintf("失败: %s -> %s（%s）", u.Local, u.Remote, u.Error)
 	}
-	return nil
-}
-
-// printUploadResults 上传失败/跳过时在 stderr 回显现场，便于当场定位
-func printUploadResults(vm *VM, uploads []*UploadResult) {
-	var lines []string
-	for _, u := range uploads {
-		if u == nil {
-			continue
-		}
-		switch u.State {
-		case "skipped":
-			lines = append(lines, fmt.Sprintf("  跳过: %s -> %s（%s）", u.Local, u.Remote, u.Error))
-		case "error":
-			lines = append(lines, fmt.Sprintf("  失败: %s -> %s（%s）", u.Local, u.Remote, u.Error))
-		}
-	}
-	if len(lines) == 0 {
-		return
-	}
-	fmt.Fprintf(os.Stderr, "\n[上传] %s (%s)\n%s\n", vm.Name, vm.IP, strings.Join(lines, "\n"))
 }
 
 // shellQuote POSIX 单引号转义，把远端路径安全嵌入命令（防止路径含特殊字符注入）
@@ -307,21 +458,26 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// runScript 通过 stdin 以 `bash -s` 在远端执行脚本（内容不经过 shell 拼接，无转义问题）。
-// 带脚本级超时（默认 60s），超时关闭会话强制中断远端命令；失败不影响 SSH 登录结果标记。
-// 结果按 State 分类：success / fail(收到退出码) / timeout / interrupted(会话被掐断，如 init 0、reboot) / error(未执行)。
-func runScript(client *ssh.Client, cfg *Config) *ScriptResult {
-	res := &ScriptResult{ExitCode: -1}
+// ---------- script 模块（本地 / 远端执行命令或脚本） ----------
 
-	content, err := cfg.ScriptContent()
+// runRemoteScript 通过 SSH 在远端执行脚本步骤：内容经 stdin 以 `bash -s` 执行（不经 shell 拼接）。
+// 支持 remoteWorkDir 先 cd 到指定目录；带步骤级超时，超时关闭会话强制中断；
+// 结果分类：success / fail(收到退出码) / timeout / interrupted(会话被掐断，如 init 0/reboot) / error(未执行)。
+func runRemoteScript(client *ssh.Client, step ExecStep, name string) *ExecStepResult {
+	start := time.Now()
+	res := &ExecStepResult{Name: name, Type: "script", Target: "remote", ExitCode: -1}
+
+	content, err := StepScriptContent(step)
 	if err != nil {
 		res.State = "error"
 		res.Error = err.Error()
+		res.Duration = stepDuration(start)
 		return res
 	}
 	if strings.TrimSpace(content) == "" {
 		res.State = "error"
 		res.Error = "脚本内容为空"
+		res.Duration = stepDuration(start)
 		return res
 	}
 
@@ -329,11 +485,12 @@ func runScript(client *ssh.Client, cfg *Config) *ScriptResult {
 	if err != nil {
 		res.State = "error"
 		res.Error = "创建会话失败: " + err.Error()
+		res.Duration = stepDuration(start)
 		return res
 	}
 	defer session.Close()
 
-	// 脚本内容走 SSH channel 的 stdin 传给远端 bash，规避引号/特殊字符问题
+	// 内容走 SSH channel 的 stdin 传给远端 bash，规避引号/特殊字符问题
 	session.Stdin = strings.NewReader(content)
 	var outBuf, errBuf syncBuf
 	session.Stdout = &outBuf
@@ -341,17 +498,16 @@ func runScript(client *ssh.Client, cfg *Config) *ScriptResult {
 
 	done := make(chan error, 1)
 	cmd := "bash -s"
-	if cfg.SSH.RemoteWorkDir != "" {
-		// 在指定目录下执行脚本（配合 upload 把脚本传到该目录后运行）
-		cmd = "cd " + shellQuote(cfg.SSH.RemoteWorkDir) + " && bash -s"
+	if step.RemoteWorkDir != "" {
+		cmd = "cd " + shellQuote(step.RemoteWorkDir) + " && bash -s"
 	}
 	go func() { done <- session.Run(cmd) }()
 
+	timeout := StepTimeout(step)
 	select {
 	case err := <-done:
 		res.Output, res.Truncated = truncateOutput(mergeOutput(outBuf.String(), errBuf.String()), maxScriptOutput)
 		if err == nil {
-			res.OK = true
 			res.ExitCode = 0
 			res.State = "success"
 		} else {
@@ -363,7 +519,7 @@ func runScript(client *ssh.Client, cfg *Config) *ScriptResult {
 				res.State = "fail"
 			}
 		}
-	case <-time.After(cfg.ScriptTimeoutDuration()):
+	case <-time.After(timeout):
 		// 超时：关闭会话以中断远端命令，并尽量保存已收到的输出
 		session.Close()
 		select {
@@ -372,8 +528,86 @@ func runScript(client *ssh.Client, cfg *Config) *ScriptResult {
 		}
 		res.Output, res.Truncated = truncateOutput(mergeOutput(outBuf.String(), errBuf.String()), maxScriptOutput)
 		res.State = "timeout"
-		res.Error = fmt.Sprintf("脚本执行超时(%s)", cfg.ScriptTimeoutDuration())
+		res.Error = fmt.Sprintf("脚本执行超时(%s)", timeout)
 	}
+	res.Duration = stepDuration(start)
+	return res
+}
+
+// runLocalScript 在本机执行脚本步骤：内容经 shell 执行（Unix 用 sh -s 传 stdin；Windows 用 cmd /C）。
+// 带步骤级超时，超时强制 kill；结果分类：success / fail / timeout / error(未执行)。
+func runLocalScript(step ExecStep, name string) *ExecStepResult {
+	start := time.Now()
+	res := &ExecStepResult{Name: name, Type: "script", Target: "local", ExitCode: -1}
+
+	content, err := StepScriptContent(step)
+	if err != nil {
+		res.State = "error"
+		res.Error = err.Error()
+		res.Duration = stepDuration(start)
+		return res
+	}
+	if strings.TrimSpace(content) == "" {
+		res.State = "error"
+		res.Error = "脚本内容为空"
+		res.Duration = stepDuration(start)
+		return res
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), StepTimeout(step))
+	defer cancel()
+
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.Command("cmd", "/C", content)
+	} else {
+		cmd = exec.Command("sh", "-s")
+		cmd.Stdin = strings.NewReader(content)
+	}
+	setProcessGroup(cmd) // Unix: 独立进程组，超时时可整组杀掉（连带 sleep 等子进程）
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+
+	if err := cmd.Start(); err != nil {
+		res.State = "error"
+		res.Error = "启动本地命令失败: " + err.Error()
+		res.Duration = stepDuration(start)
+		return res
+	}
+
+	// 超时：杀掉整个进程组；不杀孙进程的话，sleep 等子进程会持有 stdout 管道，
+	// 导致 cmd.Wait() 一直等待拷贝协程结束（拖到子进程自然退出）。
+	// 先 Start 再启动看门狗，保证 cmd.Process 已赋值（无数据竞争）。
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			killProcessGroup(cmd)
+		case <-done:
+		}
+	}()
+	err = cmd.Wait()
+	close(done)
+
+	res.Output, res.Truncated = truncateOutput(mergeOutput(outBuf.String(), errBuf.String()), maxScriptOutput)
+	switch {
+	case ctx.Err() == context.DeadlineExceeded:
+		res.State = "timeout"
+		res.Error = fmt.Sprintf("脚本执行超时(%s)", StepTimeout(step))
+	case err != nil:
+		if ee, ok := err.(*exec.ExitError); ok {
+			res.ExitCode = ee.ExitCode()
+		} else {
+			res.ExitCode = -1
+		}
+		res.Error = err.Error()
+		res.State = "fail"
+	default:
+		res.ExitCode = 0
+		res.State = "success"
+	}
+	res.Duration = stepDuration(start)
 	return res
 }
 
@@ -401,7 +635,7 @@ func isInterrupted(err error) bool {
 	return false
 }
 
-// maxScriptOutput 单台脚本输出保留上限；超出截断（保留末尾），防止脚本刷屏拖垮内存/Excel 导出
+// maxScriptOutput 单步输出保留上限；超出截断（保留末尾），防止刷屏拖垮内存/Excel 导出
 const maxScriptOutput = 100 << 10 // 100KB
 
 // truncateOutput 将输出截断到 max 字节（保留末尾，回退到 UTF-8 边界），返回截断后的内容与是否截断
@@ -459,17 +693,17 @@ func (s *syncBuf) String() string {
 	return s.b.String()
 }
 
-// scriptFailTailLines 脚本失败/超时/会话中断时，stderr 回显输出尾部行数
-const scriptFailTailLines = 20
+// stepFailTailLines 步骤失败/超时/会话中断时，stderr 回显输出尾部行数
+const stepFailTailLines = 20
 
-// printScriptFailure 脚本非成功结果时在 stderr 回显状态、原因与输出尾部，便于当场定位
-func printScriptFailure(vm *VM, s *ScriptResult) {
-	fmt.Fprintf(os.Stderr, "\n[脚本] %s (%s) %s\n", vm.Name, vm.IP, scriptResultLabel(s))
+// printStepFailure 步骤非成功结果时在 stderr 回显状态、原因与输出尾部，便于当场定位
+func printStepFailure(vm *VM, s *ExecStepResult) {
+	fmt.Fprintf(os.Stderr, "\n[流水线] %s (%s) 步骤[%s] %s\n", vm.Name, vm.IP, s.Name, stepResultLabel(s))
 	if s.Error != "" {
 		fmt.Fprintf(os.Stderr, "  原因: %s\n", s.Error)
 	}
-	if tail := lastLines(s.Output, scriptFailTailLines); tail != "" {
-		fmt.Fprintf(os.Stderr, "  ----- 输出尾部(最后%d行) -----\n%s\n  ------------------------------\n", scriptFailTailLines, tail)
+	if tail := lastLines(s.Output, stepFailTailLines); tail != "" {
+		fmt.Fprintf(os.Stderr, "  ----- 输出尾部(最后%d行) -----\n%s\n  ------------------------------\n", stepFailTailLines, tail)
 	}
 }
 
@@ -487,18 +721,18 @@ func scriptLogDir(cfg *Config) string {
 	return dir
 }
 
-// writeScriptLog 将单台机器的脚本结果写入 <机器名>_<IP>.log
-func writeScriptLog(dir string, vm *VM, s *ScriptResult) {
-	content := fmt.Sprintf("# %s (%s)\n# 状态: %s | 退出码: %d%s\n%s",
-		vm.Name, vm.IP, scriptResultLabel(s), s.ExitCode, orErrSuffix(s), s.Output)
-	path := filepath.Join(dir, sanitizeFileName(vm.Name)+"_"+sanitizeFileName(vm.IP)+".log")
+// writeScriptLog 将单台机器某个 script 步骤的结果写入 <机器名>_<IP>_<步骤名>.log
+func writeScriptLog(dir string, vm *VM, s *ExecStepResult) {
+	content := fmt.Sprintf("# %s (%s)\n# 步骤: %s | 类型: %s | 状态: %s | 退出码: %d | 耗时: %s%s\n%s",
+		vm.Name, vm.IP, s.Name, s.Type, stepResultLabel(s), s.ExitCode, s.Duration, orErrSuffix(s), s.Output)
+	path := filepath.Join(dir, sanitizeFileName(vm.Name)+"_"+sanitizeFileName(vm.IP)+"_"+sanitizeFileName(s.Name)+".log")
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		fmt.Fprintf(os.Stderr, "\n警告: 写入脚本输出 %s 失败: %v\n", path, err)
 	}
 }
 
 // orErrSuffix 错误信息的前缀后缀（无错误返回空串）
-func orErrSuffix(s *ScriptResult) string {
+func orErrSuffix(s *ExecStepResult) string {
 	if s.Error == "" {
 		return ""
 	}
@@ -530,6 +764,65 @@ func exitCode(err error) int {
 		return ee.ExitStatus()
 	}
 	return -1
+}
+
+// ---------- status / services 模块（复用状态采集） ----------
+
+// execStatusStep 采集服务器运行状态（尽力而为，失败不阻塞流水线）
+func execStatusStep(client *ssh.Client, step ExecStep, name string) (*ExecStepResult, *ServerStatus) {
+	start := time.Now()
+	res := &ExecStepResult{Name: name, Type: "status", Target: "remote", ExitCode: -1}
+	st := collectServerStatus(client)
+	if st == nil {
+		res.State = "error"
+		res.Error = "采集服务器运行状态失败"
+		res.Duration = stepDuration(start)
+		return res, nil
+	}
+	var parts []string
+	if st.OS != "" {
+		parts = append(parts, "OS "+st.OS)
+	}
+	if st.Kernel != "" {
+		parts = append(parts, "内核 "+st.Kernel)
+	}
+	if st.CPUUsed != "" {
+		parts = append(parts, "CPU "+st.CPUUsed+"%")
+	}
+	if st.MemUsedPct != "" {
+		parts = append(parts, "内存 "+st.MemUsedPct+"%")
+	}
+	if st.DiskUsePct != "" {
+		parts = append(parts, "磁盘 "+st.DiskUsePct+"%")
+	}
+	if st.LoadAvg != "" {
+		parts = append(parts, "负载 "+st.LoadAvg)
+	}
+	res.Output = strings.Join(parts, " | ")
+	res.State = "success"
+	res.Duration = stepDuration(start)
+	return res, st
+}
+
+// execServicesStep 检查服务运行状态（尽力而为，失败不阻塞流水线）
+func execServicesStep(client *ssh.Client, step ExecStep, name string) (*ExecStepResult, []ServiceStatus) {
+	start := time.Now()
+	res := &ExecStepResult{Name: name, Type: "services", Target: "remote", ExitCode: -1}
+	svcs := collectServiceStatus(client, StepServiceNames(step))
+	if svcs == nil {
+		res.State = "error"
+		res.Error = "检查服务状态失败"
+		res.Duration = stepDuration(start)
+		return res, nil
+	}
+	lines := make([]string, 0, len(svcs))
+	for _, s := range svcs {
+		lines = append(lines, s.Name+"="+s.State)
+	}
+	res.Output = strings.Join(lines, "\n")
+	res.State = "success"
+	res.Duration = stepDuration(start)
+	return res, svcs
 }
 
 // collectServerStatus 采集服务器运行状态（尽力而为，失败不阻塞）

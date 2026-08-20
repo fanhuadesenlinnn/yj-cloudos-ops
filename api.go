@@ -270,17 +270,20 @@ type ServiceStatus struct {
 	State string // 原始状态: active/inactive/failed/unknown/not-found
 }
 
-// ScriptResult 脚本执行结果（配置了 ssh.script / ssh.scriptPath 时执行）
-type ScriptResult struct {
-	OK        bool   // 是否执行成功（退出码 0 且无错误）
-	ExitCode  int    // 远端退出码；-1 表示未能获取（如会话中断/创建失败）
-	Output    string // 脚本输出（stdout+stderr 合并；超过上限时截断并置 Truncated）
-	Error     string // 错误信息（失败原因 / 超时 / 会话中断）
-	State     string // 结果分类: success / fail / timeout / interrupted / error
+// ExecStepResult 一个流水线步骤的执行结果（execList.steps 中的一步）
+type ExecStepResult struct {
+	Name      string // 步骤名（缺省自动生成 step1/step2...）
+	Type      string // upload / script / services / status
+	Target    string // local / remote
+	State     string // success / fail / skipped / timeout / interrupted / error
+	ExitCode  int    // 脚本类步骤的退出码；-1 表示未能获取（超时/会话中断/未执行）
+	Output    string // 执行输出（合并 stdout/stderr；超过上限时截断并置 Truncated）
+	Error     string // 失败原因 / 跳过原因
+	Duration  string // 耗时，如 "1.23s"
 	Truncated bool   // 输出是否因超过上限被截断
 }
 
-// UploadResult 文件上传结果（配置了 ssh.upload 时，登录成功后、执行脚本前上传）
+// UploadResult 单个文件的上传结果（upload 步骤内部展开为多条，汇总到 ExecStepResult.Output）
 type UploadResult struct {
 	Local       string // 本地文件路径
 	Remote      string // 远端路径
@@ -311,11 +314,10 @@ type VM struct {
 	SSHResult    string
 	ProjectID    string
 	ProjectName  string
-	ServerStatus *ServerStatus   // SSH 登录成功后采集的服务器运行状态
-	Services     []ServiceStatus // SSH 登录成功后检查的服务运行状态
-	Uploads      []*UploadResult // SSH 登录成功后、脚本执行前上传的文件结果（未配置上传为 nil）
-	Script       *ScriptResult   // SSH 登录成功后执行的脚本结果（未配置脚本为 nil）
-	EniIDs       []string        // 裸金属网卡ID（用于反查 MAC）
+	ServerStatus *ServerStatus     // status 步骤采集的服务器运行状态（默认流水线/配置了 status 步骤时填充）
+	Services     []ServiceStatus   // services 步骤检查的服务运行状态（默认流水线/配置了 services 步骤时填充）
+	ExecSteps    []*ExecStepResult // 该台机器执行的流水线步骤结果（按配置顺序）
+	EniIDs       []string          // 裸金属网卡ID（用于反查 MAC）
 }
 
 // ---------- GetProjectList ----------

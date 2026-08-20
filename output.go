@@ -15,9 +15,9 @@ import (
 
 func outputTable(cfg *Config, vms []*VM) error {
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "序号\t名称\t类型\t内网IP\tEIP\tMAC\t规格\t系统盘\t数据盘\t项目\t密码\tSSH登录\t运行状态\t服务状态\t文件上传\t脚本执行")
+	fmt.Fprintln(w, "序号\t名称\t类型\t内网IP\tEIP\tMAC\t规格\t系统盘\t数据盘\t项目\t密码\tSSH登录\t运行状态\t服务状态\t流水线")
 	for i, vm := range vms {
-		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			i+1,
 			orDash(vm.Name),
 			orDash(vm.Type),
@@ -32,95 +32,53 @@ func outputTable(cfg *Config, vms []*VM) error {
 			vm.SSHResult,
 			statusStr(vm),
 			servicesStr(vm),
-			uploadStr(vm),
-			scriptStr(vm),
+			pipelineStr(vm),
 		)
 	}
 	return w.Flush()
 }
 
-// uploadStr 文件上传摘要（屏幕/CSV/虚拟机清单展示）
-func uploadStr(vm *VM) string {
-	ups := vm.Uploads
-	if len(ups) == 0 {
+// pipelineStr 流水线执行摘要（屏幕/CSV/虚拟机清单展示）：每步“序号+状态符号”，如 “1✓ 2✗ 3✓”
+func pipelineStr(vm *VM) string {
+	steps := vm.ExecSteps
+	if len(steps) == 0 {
 		return "—"
 	}
-	ok, skip, fail := 0, 0, 0
-	for _, u := range ups {
-		if u == nil {
+	parts := make([]string, 0, len(steps))
+	for i, s := range steps {
+		if s == nil {
 			continue
 		}
-		switch u.State {
-		case "success":
-			ok++
-		case "skipped":
-			skip++
-		default:
-			fail++
-		}
+		parts = append(parts, fmt.Sprintf("%d%s", i+1, stepSymbol(s)))
 	}
-	switch {
-	case fail > 0:
-		return fmt.Sprintf("✗ %d失败", fail)
-	case skip > 0:
-		return fmt.Sprintf("✓ %d/%d(跳过%d)", ok, len(ups), skip)
-	default:
-		return fmt.Sprintf("✓ %d/%d", ok, len(ups))
-	}
-}
-
-// uploadResultLabel 单条上传结果中文说明（Excel 明细用）
-func uploadResultLabel(u *UploadResult) string {
-	if u == nil {
-		return ""
-	}
-	switch u.State {
-	case "success":
-		if u.Overwritten {
-			return "已覆盖"
-		}
-		return "上传成功"
-	case "skipped":
-		return "跳过(已存在)"
-	case "error":
-		return "失败"
-	default:
-		return u.State
-	}
-}
-
-// scriptStr 脚本执行摘要（屏幕展示；按 State 分类，错误信息过长时截断）
-func scriptStr(vm *VM) string {
-	s := vm.Script
-	if s == nil {
+	if len(parts) == 0 {
 		return "—"
 	}
+	return strings.Join(parts, " ")
+}
+
+// stepSymbol 步骤状态符号（屏幕摘要用）
+func stepSymbol(s *ExecStepResult) string {
 	switch s.State {
 	case "success":
-		return "✓ 成功"
+		return "✓"
 	case "fail":
-		return fmt.Sprintf("✗ 失败(exit %d)", s.ExitCode)
+		return "✗"
 	case "timeout":
-		return "✗ 超时"
+		return "超"
 	case "interrupted":
-		return "✗ 会话中断(疑似关机/重启)"
-	case "error":
-		return "✗ " + truncate(s.Error, 30)
-	default: // 兼容未设置 State 的旧结果
-		if s.OK {
-			return "✓ 成功"
-		}
-		if s.Error != "" {
-			return "✗ " + truncate(s.Error, 30)
-		}
-		return fmt.Sprintf("✗ 失败(exit %d)", s.ExitCode)
+		return "断"
+	case "skipped":
+		return "-"
+	default: // error
+		return "!"
 	}
 }
 
-// scriptResultLabel 脚本执行结果中文说明（Excel/落盘用，不截断）
-func scriptResultLabel(s *ScriptResult) string {
+// stepResultLabel 单个流水线步骤结果中文说明（Excel/落盘用，不截断）
+func stepResultLabel(s *ExecStepResult) string {
 	if s == nil {
-		return "未配置脚本"
+		return "未执行"
 	}
 	switch s.State {
 	case "success":
@@ -131,13 +89,12 @@ func scriptResultLabel(s *ScriptResult) string {
 		return "超时"
 	case "interrupted":
 		return "会话中断(疑似关机/重启)"
+	case "skipped":
+		return "未执行(上游失败)"
 	case "error":
 		return "未执行: " + s.Error
 	default:
-		if s.OK {
-			return "成功"
-		}
-		return fmt.Sprintf("失败(exit %d)", s.ExitCode)
+		return s.State
 	}
 }
 
@@ -343,7 +300,7 @@ func exportCSV(cfg *Config, vms []*VM) error {
 
 	header := []string{"序号", "虚拟机名称", "类型", "实例ID", "内网IP", "EIP", "MAC", "状态",
 		"规格编码", "规格描述", "CPU核数", "内存G", "系统盘大小G", "系统盘类型", "系统盘描述",
-		"数据盘", "项目名称", "项目ID", "root密码", "SSH登录结果", "服务状态", "文件上传", "脚本执行",
+		"数据盘", "项目名称", "项目ID", "root密码", "SSH登录结果", "服务状态", "流水线",
 		"操作系统", "内核版本", "运行时长", "负载(1/5/15)",
 		"CPU使用率%", "内存总量", "内存已用", "内存使用率%",
 		"根分区总量", "根分区已用", "根分区使用率%"}
@@ -373,8 +330,7 @@ func exportCSV(cfg *Config, vms []*VM) error {
 			vm.Password,
 			vm.SSHResult,
 			servicesStr(vm),
-			uploadStr(vm),
-			scriptStr(vm),
+			pipelineStr(vm),
 		}
 		row = append(row, statusCSVFields(vm)...)
 		if err := w.Write(row); err != nil {
@@ -408,7 +364,7 @@ func exportExcel(cfg *Config, vms []*VM) error {
 
 	header := []string{"序号", "虚拟机名称", "类型", "实例ID", "内网IP", "EIP", "MAC", "状态",
 		"规格编码", "规格描述", "CPU核数", "内存G", "系统盘大小G", "系统盘类型", "系统盘描述",
-		"数据盘", "项目名称", "项目ID", "root密码", "SSH登录结果", "文件上传", "脚本执行"}
+		"数据盘", "项目名称", "项目ID", "root密码", "SSH登录结果", "流水线"}
 	style, _ := f.NewStyle(&excelize.Style{Font: &excelize.Font{Bold: true}})
 	writeHeader(f, sheet, header, style)
 
@@ -434,8 +390,7 @@ func exportExcel(cfg *Config, vms []*VM) error {
 			vm.ProjectID,
 			vm.Password,
 			vm.SSHResult,
-			uploadStr(vm),
-			scriptStr(vm),
+			pipelineStr(vm),
 		}
 		for j, v := range row {
 			cell, _ := excelize.CoordinatesToCellName(j+1, i+2)
@@ -505,67 +460,37 @@ func exportExcel(cfg *Config, vms []*VM) error {
 		return err
 	}
 
-	// 脚本执行结果表（每台虚拟机一行，脚本输出存全文；超限截断时输出自带截断标注）
-	scrSheet := "脚本执行结果"
-	f.NewSheet(scrSheet)
-	scrHeader := []string{"序号", "虚拟机名称", "内网IP", "项目名称", "SSH登录结果",
-		"脚本执行结果", "退出码", "错误信息", "脚本输出"}
-	writeHeader(f, scrSheet, scrHeader, style)
-	scrRow := 2
+	// 流水线执行结果表（每台虚拟机每个步骤一行，含输出/退出码/耗时；输出超限截断时自带截断标注）
+	plSheet := "流水线执行结果"
+	f.NewSheet(plSheet)
+	plHeader := []string{"序号", "虚拟机名称", "内网IP", "项目名称", "SSH登录结果",
+		"步骤名", "类型", "目标", "结果", "退出码", "耗时", "错误信息", "输出"}
+	writeHeader(f, plSheet, plHeader, style)
+	plRow := 2
 	for i, vm := range vms {
-		res, exit, errMsg, out := "未配置脚本", "", "", ""
-		if s := vm.Script; s != nil {
-			res = scriptResultLabel(s)
-			exit = itoa(s.ExitCode)
-			errMsg = s.Error
-			out = s.Output
-		}
-		row := []any{i + 1, vm.Name, vm.IP, vm.ProjectName, vm.SSHResult, res, exit, errMsg, out}
-		for j, v := range row {
-			cell, _ := excelize.CoordinatesToCellName(j+1, scrRow)
-			f.SetCellValue(scrSheet, cell, v)
-		}
-		scrRow++
-	}
-	if err := f.AutoFilter(scrSheet, "A1:"+cellName(len(scrHeader), scrRow-1), nil); err != nil {
-		return err
-	}
-
-	// 文件上传结果表（每台虚拟机每个文件一行，含覆盖/跳过/失败明细）
-	upSheet := "文件上传结果"
-	f.NewSheet(upSheet)
-	upHeader := []string{"序号", "虚拟机名称", "内网IP", "项目名称", "SSH登录结果",
-		"本地路径", "远端路径", "结果", "是否覆盖", "权限", "错误信息"}
-	writeHeader(f, upSheet, upHeader, style)
-	upRow := 2
-	for i, vm := range vms {
-		if len(vm.Uploads) == 0 {
-			row := []any{i + 1, vm.Name, vm.IP, vm.ProjectName, vm.SSHResult, "", "", "", "", "", ""}
+		if len(vm.ExecSteps) == 0 {
+			row := []any{i + 1, vm.Name, vm.IP, vm.ProjectName, vm.SSHResult, "", "", "", "", "", "", "", ""}
 			for j, v := range row {
-				cell, _ := excelize.CoordinatesToCellName(j+1, upRow)
-				f.SetCellValue(upSheet, cell, v)
+				cell, _ := excelize.CoordinatesToCellName(j+1, plRow)
+				f.SetCellValue(plSheet, cell, v)
 			}
-			upRow++
+			plRow++
 			continue
 		}
-		for _, u := range vm.Uploads {
-			if u == nil {
+		for _, s := range vm.ExecSteps {
+			if s == nil {
 				continue
 			}
-			over := "否"
-			if u.Overwritten {
-				over = "是"
-			}
 			row := []any{i + 1, vm.Name, vm.IP, vm.ProjectName, vm.SSHResult,
-				u.Local, u.Remote, uploadResultLabel(u), over, u.Mode, u.Error}
+				s.Name, s.Type, s.Target, stepResultLabel(s), itoa(s.ExitCode), s.Duration, s.Error, s.Output}
 			for j, v := range row {
-				cell, _ := excelize.CoordinatesToCellName(j+1, upRow)
-				f.SetCellValue(upSheet, cell, v)
+				cell, _ := excelize.CoordinatesToCellName(j+1, plRow)
+				f.SetCellValue(plSheet, cell, v)
 			}
-			upRow++
+			plRow++
 		}
 	}
-	if err := f.AutoFilter(upSheet, "A1:"+cellName(len(upHeader), upRow-1), nil); err != nil {
+	if err := f.AutoFilter(plSheet, "A1:"+cellName(len(plHeader), plRow-1), nil); err != nil {
 		return err
 	}
 

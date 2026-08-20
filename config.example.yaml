@@ -35,44 +35,71 @@ ssh:
   workers: 5           # 并发测试数量
   verifyCommand: "echo ok"   # 登录成功后执行的验证命令
   useIp: internal      # 用哪个IP测试: internal=内网IP / eip=弹性公网IP / internal-then-eip=先内网后EIP
-  checkStatus: true    # 登录成功后采集服务器运行状态(OS/内核/负载/CPU/内存/磁盘)，true/false，未配置默认true
-  checkServices: true  # 登录成功后检查服务运行状态，true/false，未配置默认true
-  services:            # 要检查的服务名列表；留空默认检查 sshd，如 sshd/crond/docker/nginx
-    - sshd
-    # - crond
-    # - docker
+  # services:          # 未配置 exec-list 时，默认流水线的 services 步骤检查的服务名；留空默认检查 sshd
+  #   - sshd
+  #   - docker
 
-  # 脚本执行（可选）：SSH 登录成功后，在每台服务器上以 root 执行脚本。
-  # script 与 scriptPath 二选一：
-  #   - script:     直接在配置里内嵌脚本内容（多行，注意缩进）
-  #   - scriptPath: 本地脚本文件路径，工具读取内容后通过 bash -s 在远端执行，无需上传
-  # 脚本内容走 SSH stdin 传输，不需要写文件、无转义问题；脚本请用 LF 换行。
-  # 脚本以 root 身份执行，等同于远端任意代码执行，请勿在脚本中写入密码等敏感信息。
-  # 结果分类（屏幕「脚本执行」列 + Excel「脚本执行结果」Sheet）：
-  #   成功 / 失败(exit N) / 超时 / 会话中断(疑似关机/重启，如脚本里执行了 init 0、reboot)。
-  # 失败/超时/会话中断时，stderr 会自动回显该台机器的状态、原因与输出尾部(最后20行)，便于当场定位。
-  # 单台输出上限 100KB，超出截断（保留末尾）并标注，防止脚本刷屏拖垮内存/Excel 导出。
-  # 注意: 脚本失败/超时/会话中断均不影响 SSH 登录结果标记。
-  script: ""
-  # scriptPath: "scripts/check.sh"
-  scriptTimeout: 60s   # 单台脚本执行超时，默认 60s，超时强制中断并标记失败
+# ============================================================================
+# 流水线 exec-list：登录成功的每台服务器上按顺序执行的模块列表（唯一执行模型）。
+# 三种配置形态：
+#   1) 不配置（删除本段）      -> 默认流水线: status（采集运行状态）-> services（检查服务状态），
+#                                保持工具原有的检查能力（SSH 登录后自动采集状态+查服务）
+#   2) execList: []           -> 显式空流水线：不执行任何步骤，只测 SSH 连通性
+#   3) 配置步骤列表            -> 完全按下面的步骤执行
+#
+# 步骤通用字段：
+#   name     步骤名（展示/结果表用，缺省自动生成 step1/step2...）
+#   type     模块类型: upload / script / services / status
+#   target   local（本机执行）/ remote（远端服务器执行）;
+#            upload/services/status 固定 remote；script 可配置，缺省 remote
+#   run      once（本地步骤只跑一次，缺省） / always（每台服务器都跑）; 仅 target=local 有意义
+#   onError  stop（失败终止后续步骤，缺省）/ continue（失败后继续下一步）
+#            注意: 本地 once 步骤失败且 onError=stop 时，全局终止（所有机器不再执行后续步骤）；
+#            远端步骤失败且 onError=stop 时，只终止该台机器的后续步骤。
+# 每台机器执行时，前一步失败(且 onError=stop)则后续步骤标记"未执行(上游失败)"。
+# ============================================================================
+execList:
+    # ---- 示例1: 本地构建（只跑一次）----
+    # - name: "本地构建打包"
+    #   type: script
+    #   target: local
+    #   run: once          # 只跑一次（默认），不重复执行
+    #   command: "go build -o dist/app ."   # 单行命令；或 script: 内嵌多行 / scriptPath: 本地脚本文件
+    #   timeout: 120s      # 单次执行超时，默认 60s
 
-  # 文件上传（可选）：SSH 登录成功后、执行脚本前，把本地文件传到远端指定位置。
-  # 每条规则一个本地文件 -> 远端绝对路径；同名文件已存在时默认跳过（安全），
-  # 设置 overwrite: true 或全局 uploadOverwrite: true 才会覆盖替换。
-  # 典型用法：先上传脚本到目标目录（可替换旧版），再用 remoteWorkDir + script 在该目录运行。
-  uploadOverwrite: false   # 全局默认是否覆盖同名文件；false=远端已存在则跳过，true=总是覆盖
-  uploadMkdirs: true       # 远端父目录不存在时自动创建，未配置默认 true
-  remoteWorkDir: ""        # 执行脚本前先 cd 到的远端目录（绝对路径），如 "/opt/myapp"
-  upload:
-    - local: "scripts/deploy.sh"      # 本地文件路径
-      remote: "/opt/myapp/deploy.sh" # 远端绝对路径（“传到指定位置”），父目录不存在会自动创建
-      mode: "0755"                    # 远端文件权限（八进制字符串），默认 0644；脚本类建议 0755
-      overwrite: true                  # 可选：覆盖同名文件；缺省用上面的 uploadOverwrite
-    # - local: "config/app.conf"
-    #   remote: "/etc/app/app.conf"   # 这个文件默认不覆盖，远端已有就跳过
-  # 注意：上传失败时该台机器的脚本不会执行（标记“未执行”，避免误跑远端旧文件），
-  #       但上传失败/跳过均不影响 SSH 登录结果标记；跳过与失败会在 stderr 回显。
+    # ---- 示例2: 上传模块（传输文件/文件夹，远端精确到文件）----
+    # - name: "上传安装包"
+    #   type: upload                 # target 固定 remote
+    #   overwrite: true              # 步骤级默认覆盖远端同名文件；缺省 false=已存在则跳过（安全）
+    #   mkdirs: true                 # 远端父目录不存在时自动创建，缺省 true
+    #   files:
+    #     - local: "dist/app.tar.gz"          # 本地文件
+    #       remote: "/opt/myapp/app.tar.gz"  # 远端精确文件路径（必须以 / 开头，不能以 / 结尾）
+    #       mode: "0644"                      # 远端权限，八进制，默认 0644
+    #       # overwrite: true                 # 单文件覆盖开关，优先于步骤级
+    #     - local: "configs/"                 # 本地文件夹：递归传输，保持目录结构
+    #       remote: "/opt/myapp/configs"      # 文件夹时远端为目标目录，每个文件映射为 目录/<相对路径>
+    #   onError: stop                # 任一文件上传失败则终止本台后续步骤（避免误跑旧文件）
+
+    # ---- 示例3: 远端部署脚本（每台机器都跑）----
+    # - name: "远端部署"
+    #   type: script
+    #   target: remote               # 在每台服务器上经 SSH 执行（内容走 stdin 传 bash -s，无转义问题）
+    #   scriptPath: "scripts/deploy.sh"   # 或 script: 内嵌多行 / command: 单行命令
+    #   remoteWorkDir: "/opt/myapp"       # 执行前先 cd 到该目录（配合 upload 把脚本传到该目录后运行）
+    #   timeout: 60s
+    #   onError: stop
+
+    # ---- 示例4: 服务状态检查（原 ssh.services 模块收编为流水线步骤）----
+    # - name: "检查服务"
+    #   type: services              # target 固定 remote
+    #   services: ["sshd", "docker"] # 留空默认检查 sshd；结果写入 Excel「服务运行状态」Sheet
+    #   onError: continue
+
+    # ---- 示例5: 服务器运行状态采集（原 checkStatus 模块收编为流水线步骤）----
+    # - name: "采集运行状态"
+    #   type: status                # target 固定 remote；结果写入 Excel「服务器运行状态」Sheet
+    #   onError: continue
 
 # 接口原始返回数据保存目录，留空则不保存
 # 目录结构: raw.dir/<运行时间戳>/<Action>[_p<页码>].json
@@ -84,6 +111,6 @@ output:
   showPassword: true   # 屏幕是否显示密码，false 则显示 ******
   csvPath: ""          # 留空不导出CSV，如 "result.csv"
   excelPath: ""        # 留空不导出Excel，如 "result.xlsx"
-  # 脚本输出落盘目录（可选），留空不落盘；配置后每台执行过脚本的机器一个 .log:
-  # 目录结构: scriptDir/<运行时间戳>/<机器名>_<内网IP>.log，方便逐行排查完整输出
+  # script 步骤输出落盘目录（可选），留空不落盘；每个 script 步骤每个机器一个 .log:
+  # 目录结构: scriptDir/<运行时间戳>/<机器名>_<内网IP>_<步骤名>.log，方便逐行排查完整输出
   scriptDir: ""

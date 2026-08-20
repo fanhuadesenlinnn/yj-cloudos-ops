@@ -11,3 +11,6 @@ config.yaml
 # IDE
 .idea/
 .vscode/
+
+# 根目录 go build 直接产物
+/yj-cloudos-ops
