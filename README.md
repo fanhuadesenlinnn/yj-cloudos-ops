@@ -32,13 +32,16 @@ CloudOS 7.0 虚拟机检查工具（Golang）
 
 除命令行外，支持 Web 模式：浏览器里完成 **配置管理 + 运行 + 实时进度 + 结果查看 + 导出** 全流程。
 
+- **新建配置自动填充精简 demo**：替换凭证/项目即可保存运行（无需从零写 YAML）
+- **帮助页**：内置各模块使用方法（顶层配置/execList 各模块/注意事项），随二进制打包、离线可用
+
 ```bash
 ./yj-cloudos-ops-linux-amd64 -web -web-addr 0.0.0.0:8080
 ```
 
 - 启动后访问 `http://<主机>:8080`，默认账号 `admin / admin`（登录后请在「设置」页修改）
 - **多配置管理**：配置目录（默认 `./configs`，可用 `-web-configs` 或设置页修改）下每个 `.yaml` 是一个配置；
-  页面支持新建 / 编辑（表单 + YAML）/ 复制 / 删除；YAML 首行 `# 描述: xxx` 注释作为配置简介
+  页面支持新建（自动填充精简 demo）/ 编辑（表单 + YAML）/ 复制 / 删除；YAML 首行 `# 描述: xxx` 注释作为配置简介
 - 配置文件与 CLI 完全兼容：`./yj-cloudos-ops -c configs/生产环境.yaml` 可直接用同一文件
 - **运行**：选配置 →（同名多项目时页面下拉选择）→ 开始；一次只跑一个任务，重复点击会被拒绝；
   SSE 实时推送进度与日志；结果表每行可展开查看流水线步骤明细；可下载导出的 Excel
@@ -83,6 +86,19 @@ git push origin v1.0.0
 查看版本：`yj-cloudos-ops -v`
 
 ## 配置
+
+### 生成示例配置（-init）
+
+```bash
+# 生成带完整注释的示例配置到 config.yaml（已存在则不覆盖）
+./yj-cloudos-ops -init
+# 或指定路径
+./yj-cloudos-ops -init -c configs/demo.yaml
+```
+
+示例配置包含**全部模块的用法注释**（project / filter / execList 的 files/command/services/status / output 等），编辑其中的 endpoint/凭证/regionId/项目后即可使用。
+
+### 手动创建
 
 复制 `config.example.yaml` 为 `config.yaml` 并填写：
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	_ "embed"
 	"flag"
 	"fmt"
 	"os"
@@ -14,12 +15,16 @@ import (
 
 var reDiskSize = regexp.MustCompile(`^([0-9.]+)\s*([TtGgMm])?$`)
 
+//go:embed config.example.yaml
+var exampleConfigYAML string
+
 var (
 	version      = "dev"
 	configPath   = flag.String("c", "config.yaml", "YAML 配置文件路径")
 	showVer      = flag.Bool("v", false, "显示版本号")
 	listRegions  = flag.Bool("list-regions", false, "列出账号可见的区域ID（ProductCode=VM），用于填写 regionId")
 	listProjects = flag.Bool("list-projects", false, "列出账号可见的项目，用于填写 project.name")
+	initConfig   = flag.Bool("init", false, "生成一份带注释的示例配置文件（内容与 config.example.yaml 一致）")
 	webMode      = flag.Bool("web", false, "启动 Web 模式（浏览器管理配置/运行/导出）")
 	webAddr      = flag.String("web-addr", "0.0.0.0:8080", "Web 监听地址")
 	webConfigs   = flag.String("web-configs", "", "Web 配置目录（默认取 settings 里的 configsDir）")
@@ -38,6 +43,15 @@ func main() {
 	if *webMode {
 		runWeb(*webAddr, *webConfigs, *webSettings)
 		return
+	}
+
+	// -init：生成示例配置文件（已存在则不覆盖）
+	if *initConfig {
+		if err := initExampleConfig(*configPath); err != nil {
+			fmt.Fprintf(os.Stderr, "生成示例配置失败: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
 	}
 
 	cfg, err := loadConfig(*configPath)
@@ -116,6 +130,22 @@ func main() {
 			fmt.Fprintf(os.Stderr, "已导出Excel: %s\n", excelPath)
 		}
 	}
+}
+
+// initExampleConfig 生成示例配置文件到指定路径；已存在则不覆盖（返回错误提示）。
+func initExampleConfig(path string) error {
+	if fileExists(path) {
+		return fmt.Errorf("文件已存在: %s（为避免覆盖现有配置，请换一个路径）", path)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, []byte(exampleConfigYAML), 0o644); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "已生成示例配置: %s\n", path)
+	fmt.Fprintf(os.Stderr, "请编辑其中的 endpoint / accessKeyId / accessKeySecret / regionId / project 后使用\n")
+	return nil
 }
 
 // collectVMs 拉取全部服务器（按 resource.type 支持 ECS/BMS/全部），按项目过滤，补充密码、MAC、磁盘、项目名
