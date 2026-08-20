@@ -1,7 +1,8 @@
 # yj-cloudos-ops 构建流水线
 #
-# - push/PR 到 main：编译检查（vet/test）+ 双平台交叉编译
-# - 推送 v* 版本标签：自动构建 Linux/Windows 二进制并发布 GitHub Release
+# - push/PR 到 main：编译检查（vet/test）+ 6 平台交叉编译
+#   （Linux / Windows / macOS × amd64 / arm64）
+# - 推送 v* 版本标签：自动构建全部平台二进制并发布 GitHub Release
 
 name: build
 
@@ -23,9 +24,21 @@ jobs:
           - goos: linux
             goarch: amd64
             artifact: yj-cloudos-ops-linux-amd64
+          - goos: linux
+            goarch: arm64
+            artifact: yj-cloudos-ops-linux-arm64
           - goos: windows
             goarch: amd64
             artifact: yj-cloudos-ops-windows-amd64.exe
+          - goos: windows
+            goarch: arm64
+            artifact: yj-cloudos-ops-windows-arm64.exe
+          - goos: darwin
+            goarch: amd64
+            artifact: yj-cloudos-ops-darwin-amd64
+          - goos: darwin
+            goarch: arm64
+            artifact: yj-cloudos-ops-darwin-arm64
     steps:
       - name: Checkout
         uses: actions/checkout@v4

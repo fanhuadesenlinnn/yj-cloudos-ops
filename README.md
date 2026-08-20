@@ -50,19 +50,30 @@ Web 模式相关参数：`-web` / `-web-addr`（默认 0.0.0.0:8080）/ `-web-co
 
 ## 构建
 
+支持 **Windows / macOS / Linux × amd64 / arm64** 共 6 个平台（纯 Go，`CGO_ENABLED=0` 静态编译，单二进制内嵌 Web 页面）：
+
 ```bash
-# Linux amd64
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o yj-cloudos-ops-linux-amd64 .
-
-# Windows amd64
-CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o yj-cloudos-ops-windows-amd64.exe .
-
-# 或直接 make linux / make windows
+make all          # 构建全部 6 个平台，输出到 build/
+make linux        # Linux amd64 + arm64
+make windows      # Windows amd64 + arm64
+make darwin       # macOS amd64 + arm64
+make linux-amd64  # 单平台
 ```
+
+产物位于 `build/`：`yj-cloudos-ops-<平台>-<架构>[.exe]`，例如
+`yj-cloudos-ops-linux-amd64` / `yj-cloudos-ops-windows-arm64.exe` / `yj-cloudos-ops-darwin-arm64`。
+
+或手动交叉编译：
+
+```bash
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o yj-cloudos-ops-linux-arm64 .
+```
+
+> macOS 提示：从网络下载的未签名二进制首次运行需右键 → 打开，或执行 `xattr -cr yj-cloudos-ops-darwin-arm64` 后运行。
 
 ## 版本发布
 
-推送 `v*` 标签即触发 GitHub Actions 流水线自动构建双平台二进制并发布 Release：
+推送 `v*` 标签即触发 GitHub Actions 流水线自动构建全部 6 平台二进制并发布 Release：
 
 ```bash
 git tag v1.0.0
