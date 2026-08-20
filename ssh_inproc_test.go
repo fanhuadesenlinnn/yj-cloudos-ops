@@ -218,8 +218,10 @@ func TestScriptPathCRLFInProc(t *testing.T) {
 	addr := startInProcSSHServer(t, "Test@12345")
 	cfg := inProcSSHCfg(addr)
 
+	// 条件用所有平台都成立的内置变量（/etc/hostname 仅 Linux 存在，macOS 上条件为假导致输出为空），
+	// 测试目的是验证 CRLF 归一化后 if/then 语法可正常执行。
 	path := filepath.Join(t.TempDir(), "deploy.sh")
-	if err := os.WriteFile(path, []byte("if [ -f /etc/hostname ]\r\n"+
+	if err := os.WriteFile(path, []byte("if [ -n \"$PATH\" ]\r\n"+
 		"then\r\n"+
 		"  echo crlf-ok\r\n"+
 		"fi\r\n"), 0o644); err != nil {

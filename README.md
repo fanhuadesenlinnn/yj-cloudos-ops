@@ -10,6 +10,8 @@ CloudOS 7.0 虚拟机检查工具（Golang）
 - 纯 Go 实现，`CGO_ENABLED=0` 静态编译，**不依赖 glibc**，支持 Windows / Linux
 - 支持跳过证书校验
 - 项目按名称传入，支持**多项目**（`project.names`）与**全部项目**（`*` / `all`），同名多项目时屏幕列出供用户选择
+- **IP 筛选**（`filter`）：选定项目后按 IP 圈定（include）/ 剔除（exclude）要执行的主机，支持精确 IP / CIDR / 通配符，内网 IP 与弹性 IP 分开匹配；过滤掉的主机不取密码、不执行、不输出，仅统计显示
+- **实时进度**：执行阶段单行刷新，实时显示 `完成数/总数/百分比` + 正在执行的主机（IP+主机名）与其当前步骤，一眼看出卡在哪台机器哪个步骤
 - **流水线 exec-list 是唯一的执行模型**：登录成功的每台服务器按顺序执行配置的步骤模块，支持
   - `files` 传输模块：`target: push`（本机→远端）/ `pull`（远端→本机），支持文件/文件夹，覆盖/建目录/权限可配
   - `command` 命令模块：`target: local`（本机）或 `remote`（远端），可先 `workdir` 进入目录再执行命令/脚本
@@ -61,12 +63,48 @@ git push origin v1.0.0
 | `regionId` | 区域ID，如 cn-beijing |
 | `resource.type` | 检查的资源类型：`ecs`(默认) / `bms`(裸金属) / `all` |
 | `project.name` / `project.names` | 虚拟机所属项目名称（names 支持多个；填 `*` 或 `all` 检查全部项目） |
+| `filter.includeIPs` / `filter.excludeIPs` | **IP 筛选（可选）**：`IP` 列表匹配内网 IP、`EIP` 列表匹配弹性 IP；每条规则支持精确 IP / CIDR（`10.10.1.0/24`）/ 通配符（`10.10.0.*`）。include 圈定白名单（不配置不限制），再剔除 exclude；被过滤的主机不执行不输出，仅统计 |
 | `ssh.useIp` | `internal` / `eip` / `internal-then-eip` |
 | `ssh.services` | 未配置 exec-list 时默认流水线 services 步骤检查的服务名（留空默认 sshd） |
 | `execList` | **流水线步骤列表**（唯一执行模型）。**不配置**→默认流水线 status→services；**`execList: []`**→空流水线，只测 SSH 连通性；配置步骤则完全按步骤执行。每步包含模块类型、方向/位置、运行方式与失败策略，见下 |
 | `output.csvPath` / `output.excelPath` | 留空则不导出；Excel 含「虚拟机清单」「服务器运行状态」「服务运行状态」「流水线执行结果」四个 Sheet |
 | `output.scriptDir` | command 步骤完整输出按机器落盘目录（留空不落盘）；保存为 `scriptDir/<运行时间戳>/<机器名>_<内网IP>_<步骤名>.log` |
 | `raw.dir` | 接口原始返回数据保存目录，留空则不保存；保存为 `raw.dir/<运行时间戳>/<Action>[_<实例ID>][_p<页码>].json`，**可能含密码等敏感信息** |
+
+### IP 筛选 filter（可选）
+
+选定项目后，再按 IP 圈定/剔除需要执行的主机。被过滤掉的主机**不执行 SSH 测试、不取密码、不出现在结果表中**，仅在拉取时统计显示：
+
+```
+IP筛选: 共拉取 25 台，过滤掉 5 台，保留 20 台执行
+```
+
+```yaml
+filter:
+  includeIPs:                 # 白名单：只执行命中的主机（不配置则不限制）
+    IP: ["10.10.1.5", "10.10.1.0/24"]   # 匹配内网 IP
+    EIP: ["1.2.3.4"]                    # 匹配弹性公网 IP
+  excludeIPs:                 # 黑名单：剔除命中的主机（先 include 圈定，再剔除 exclude）
+    IP: ["10.10.1.7", "10.10.0.*"]
+    EIP: []
+```
+
+- 每条规则支持：**精确 IP**（`10.10.1.5`）、**CIDR**（`10.10.1.0/24`）、**通配符**（`10.10.0.*`，`*` 匹配一段非点字符）
+- include 命中判定：内网 IP 命中 `IP` 列表 **或** 弹性 IP 命中 `EIP` 列表即保留；exclude 同理，任一命中即剔除
+- 过滤在取密码/详情**之前**执行，被过滤的主机不会产生任何 API 请求
+- 规则格式错误（如非法 CIDR）在启动时即报错退出
+
+### 实时进度
+
+SSH 测试与流水线执行阶段，stderr 单行实时刷新，不再只有“完成几台”：
+
+```
+[3/20] 15% | 执行中: 10.10.1.5 web-01(2/3 部署)  10.10.1.9 db-01(1/3 分发) | 完成: 3
+```
+
+- 主机被 worker 领走（开始 SSH 连接）即显示为“执行中”，连接慢/超时的机器也能看到卡在哪
+- 每台显示 IP + 主机名 + 当前步骤（第几步/共几步 步骤名），单步超时时能看出卡在哪个步骤
+- 失败/超时等 stderr 回显会先清掉进度行、输出完再恢复，不互相覆盖；完成后进度行消失
 
 ### 流水线 exec-list
 
@@ -176,6 +214,9 @@ git push origin v1.0.0
   HMAC key 为 `Secret+"&"`，Base64 后作为 `Signature`。
 - 项目支持：`project.names` 多项目（可含 `*`/`all` 检查全部）；优先 GetProjectList 全量匹配，
   未返回时从云硬盘数据 projectName 反查，仍找不到则报错并列出可识别项目。
+- IP 筛选：`filter` 在 collectECS/collectBMS 取密码之前执行（过滤掉的主机不产生密码/详情请求）；
+  规则编译为 精确IP map + CIDR(IPNet.Contains) + 通配符正则 三种匹配器，
+  内网 IP 与弹性 IP 分开匹配，先 include 圈定再 exclude 剔除，规则格式启动时即校验。
 - 流水线：`execList` 是唯一的执行模型。阶段一在并发前串行执行 `type=command && target=local && run=once` 的步骤（只跑一次）；
   阶段二在 worker 池内对每台登录成功的服务器按顺序执行其余步骤。每步独立记录 名称/类型/方向(位置)/状态/退出码/输出/耗时，
   屏幕「流水线」列展示每步摘要（如 `1✓ 2✗ 3✓`），Excel「流水线执行结果」Sheet 每台每步一行存完整明细。
@@ -207,6 +248,10 @@ git push origin v1.0.0
   - `DescribeDisks`（/ebs，Version=2）按挂载关系匹配每台主机的数据盘（多盘）
 - SSH 登录测试：并发 worker 池，用 `root + GetEcsPassword 密码` 连接并执行验证命令，
   结果标记 `✓ 成功` / `✗ 认证失败(密码错误或已修改)` / `✗ 连接超时` 等。
+- 实时进度：`progressMgr` 维护 完成数/执行中主机(IP+主机名)/当前步骤，ticker 每 500ms 重绘 stderr 单行；
+  主机被 worker 领走即标记执行中，runPipeline 每步开始前更新步骤；
+  EIP 通过别名映射到主 key（useIp=eip 时也能正确显示）；
+  失败回显等 stderr 输出先 clear 进度行再恢复，避免互相覆盖；测试直调 trySSH 时进度控制器为 nil、自动跳过。
   **注意**：GetEcsPassword 返回的是初始密码，若用户已修改密码，登录会标记失败（属预期）。
 - OpenAPI 接口文档见 [docs](docs/)
 - 屏幕展示：一台虚拟机一行，多块磁盘用 `盘名:大小G/类型 + ...` 压缩进单元格。

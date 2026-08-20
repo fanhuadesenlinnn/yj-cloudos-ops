@@ -13,10 +13,10 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -27,7 +27,231 @@ import (
 // statusCommand 采集服务器运行状态的命令（输出用 ===标记=== 分段，便于解析）
 const statusCommand = `echo "===OS==="; . /etc/os-release 2>/dev/null; echo "$PRETTY_NAME"; echo "===KERNEL==="; uname -r; echo "===UPTIME==="; uptime; echo "===CPU==="; top -bn1 2>/dev/null | grep -m1 -E '^%Cpu|Cpu\\(s\\)'; echo "===MEM==="; free -m 2>/dev/null; echo "===DISK==="; df -h -x tmpfs -x devtmpfs 2>/dev/null`
 
-// runSSHTests 并发执行 SSH 登录测试与流水线步骤，结果写回 vm，进度输出到 stderr。
+// sshProgress 当前 runSSHTests 的实时进度控制器；未运行时为 nil（测试直接调用 trySSH/testOne 时不受影响）。
+var sshProgress *progressMgr
+
+// vmProgress 单台机器的实时执行状态（进度显示用）
+type vmProgress struct {
+	ip        string
+	name      string
+	stepIdx   int    // 当前执行到第几步（从1起；0 表示尚未开始步骤，如 SSH 连接中）
+	stepTotal int    // 流水线总步骤数
+	stepName  string // 当前步骤名
+}
+
+// progressMgr 实时执行进度控制器：stderr 单行刷新，显示 完成数/总数/百分比，
+// 以及正在执行的主机（IP+主机名）与当前步骤。与 stderr 其他输出通过 clear/refresh 协调，
+// 避免互相覆盖（打印错误前先清行、打印完恢复进度行）。
+type progressMgr struct {
+	mu      sync.Mutex
+	total   int
+	done    int
+	active  map[string]*vmProgress // key: 主机内网 IP（begin 注册）
+	aliases map[string]string      // 弹性IP(EIP) -> 主 key（内网IP），setStep/end 按实际连接 IP 解析
+	ticker  *time.Ticker
+	stopCh  chan struct{}
+	lastLen int // 上次输出行宽（显示宽度），清行用
+}
+
+// maxProgressWidth 进度单行最大显示宽度（超出截断，保持终端干净）
+const maxProgressWidth = 120
+
+func newProgressMgr(total int) *progressMgr {
+	return &progressMgr{total: total, active: map[string]*vmProgress{}, aliases: map[string]string{}}
+}
+
+// start 启动实时刷新（每 500ms 重绘一次），并立即输出首行
+func (p *progressMgr) start() {
+	if p == nil {
+		return
+	}
+	p.refresh()
+	p.stopCh = make(chan struct{})
+	p.ticker = time.NewTicker(500 * time.Millisecond)
+	go func() {
+		for {
+			select {
+			case <-p.ticker.C:
+				p.refresh()
+			case <-p.stopCh:
+				return
+			}
+		}
+	}()
+}
+
+// stop 停止刷新并清掉进度行（换行，恢复普通输出）
+func (p *progressMgr) stop() {
+	if p == nil {
+		return
+	}
+	if p.ticker != nil {
+		p.ticker.Stop()
+		close(p.stopCh)
+		p.ticker = nil
+	}
+	p.clear()
+	fmt.Fprintln(os.Stderr)
+}
+
+// begin 登记一台主机开始执行（worker 领走即调用，含 SSH 连接阶段）
+func (p *progressMgr) begin(vm *VM) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.active[vm.IP] = &vmProgress{ip: vm.IP, name: vm.Name}
+	if vm.EIP != "" {
+		p.aliases[vm.EIP] = vm.IP
+	}
+	p.mu.Unlock()
+	p.refresh()
+}
+
+// setStep 更新主机当前执行的步骤；ip 为实际连接 IP（useIp=eip 时是弹性 IP，经别名解析到主 key）
+func (p *progressMgr) setStep(ip string, idx, total int, name string) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	key := ip
+	if k, ok := p.aliases[ip]; ok {
+		key = k
+	}
+	if a, ok := p.active[key]; ok {
+		a.stepIdx = idx
+		a.stepTotal = total
+		a.stepName = name
+	}
+	p.mu.Unlock()
+}
+
+// end 标记一台主机执行完成（无论成功失败）
+func (p *progressMgr) end(vm *VM) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	delete(p.active, vm.IP)
+	if vm.EIP != "" {
+		delete(p.aliases, vm.EIP)
+	}
+	p.done++
+	p.mu.Unlock()
+	p.refresh()
+}
+
+// clear 清掉当前进度行（其他 stderr 输出前调用）
+func (p *progressMgr) clear() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	n := p.lastLen
+	p.lastLen = 0
+	p.mu.Unlock()
+	if n > 0 {
+		fmt.Fprintf(os.Stderr, "\r%s\r", strings.Repeat(" ", n))
+	} else {
+		fmt.Fprint(os.Stderr, "\r")
+	}
+}
+
+// refresh 立即重绘进度行
+func (p *progressMgr) refresh() {
+	if p == nil {
+		return
+	}
+	p.clear()
+	line := p.line()
+	if w := displayWidth(line); w > maxProgressWidth {
+		line = truncateWidth(line, maxProgressWidth) + "…"
+	}
+	p.mu.Lock()
+	p.lastLen = displayWidth(line)
+	p.mu.Unlock()
+	fmt.Fprint(os.Stderr, line)
+}
+
+// line 生成进度行文本：完成数/总数/百分比 + 执行中主机列表 + 完成数
+func (p *progressMgr) line() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	pct := 0
+	if p.total > 0 {
+		pct = p.done * 100 / p.total
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "[%d/%d] %d%%", p.done, p.total, pct)
+	if len(p.active) > 0 {
+		b.WriteString(" | 执行中: ")
+		keys := make([]string, 0, len(p.active))
+		for k := range p.active {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys) // 稳定顺序，避免 map 随机导致跳动
+		for i, k := range keys {
+			if i > 0 {
+				b.WriteString("  ")
+			}
+			a := p.active[k]
+			b.WriteString(a.ip)
+			if a.name != "" && a.name != a.ip {
+				b.WriteString(" " + a.name)
+			}
+			if a.stepTotal > 0 {
+				fmt.Fprintf(&b, "(%d/%d", a.stepIdx, a.stepTotal)
+				if a.stepName != "" {
+					b.WriteString(" " + a.stepName)
+				}
+				b.WriteString(")")
+			}
+		}
+	}
+	fmt.Fprintf(&b, " | 完成: %d", p.done)
+	return b.String()
+}
+
+// progressPrint 在进度行之外输出内容（先清行、输出、再恢复进度行），用于失败回显等
+func progressPrint(fn func()) {
+	sshProgress.clear()
+	fn()
+	sshProgress.refresh()
+}
+
+// runeWidth 字符的终端显示宽度（全角/中日韩字符按 2 列）
+func runeWidth(r rune) int {
+	if r >= 0x1100 && (r <= 0x115F || r == 0x2329 || r == 0x232A ||
+		(0x2E80 <= r && r <= 0xA4CF && r != 0x303F) ||
+		(0xAC00 <= r && r <= 0xD7A3) || (0xF900 <= r && r <= 0xFAFF) ||
+		(0xFE30 <= r && r <= 0xFE4F) || (0xFF00 <= r && r <= 0xFF60) ||
+		(0xFFE0 <= r && r <= 0xFFE6)) {
+		return 2
+	}
+	return 1
+}
+
+// displayWidth 字符串的终端显示宽度
+func displayWidth(s string) int {
+	w := 0
+	for _, r := range s {
+		w += runeWidth(r)
+	}
+	return w
+}
+
+// truncateWidth 按显示宽度截断字符串（保留完整字符，不截半）
+func truncateWidth(s string, max int) string {
+	w := 0
+	for i, r := range s {
+		cw := runeWidth(r)
+		if w+cw > max {
+			return s[:i]
+		}
+		w += cw
+	}
+	return s
+}
 // onceResults 是阶段一（本地 once 步骤）的结果，按下标与 cfg.EffectiveSteps() 对齐（非 once 步骤为 nil）；
 // globalStopped 表示阶段一因某 once 步骤失败（onError=stop）已全局终止。
 func runSSHTests(cfg *Config, vms []*VM, onceResults []*ExecStepResult, globalStopped bool) {
@@ -38,15 +262,23 @@ func runSSHTests(cfg *Config, vms []*VM, onceResults []*ExecStepResult, globalSt
 	// 脚本输出落盘目录（output.scriptDir 配置了才开）
 	scriptDir := scriptLogDir(cfg)
 
+	// 实时进度：worker 领走即标记“执行中”，每步更新，完成后累计；stderr 单行刷新
+	sshProgress = newProgressMgr(total)
+	sshProgress.start()
+	defer func() {
+		sshProgress.stop()
+		sshProgress = nil
+	}()
+
 	jobs := make(chan *VM)
 	var wg sync.WaitGroup
-	var done int64
 
 	for i := 0; i < cfg.SSH.Workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for vm := range jobs {
+				sshProgress.begin(vm) // 被 worker 领走（开始 SSH 连接）即算“开始”
 				result, status, services, steps := testOne(cfg, vm, onceResults, globalStopped)
 				vm.SSHResult = result
 				vm.ServerStatus = status
@@ -57,14 +289,14 @@ func runSSHTests(cfg *Config, vms []*VM, onceResults []*ExecStepResult, globalSt
 						continue
 					}
 					if !stepOK(s) && s.State != "skipped" {
-						printStepFailure(vm, s) // 失败/超时/会话中断：stderr 回显现场
+						// 失败/超时/会话中断：先清进度行再回显现场，完后恢复
+						progressPrint(func() { printStepFailure(vm, s) })
 					}
 					if scriptDir != "" && s.Type == "command" {
 						writeScriptLog(scriptDir, vm, s)
 					}
 				}
-				n := atomic.AddInt64(&done, 1)
-				fmt.Fprintf(os.Stderr, "\rSSH登录测试进度: %d/%d", n, total)
+				sshProgress.end(vm)
 			}
 		}()
 	}
@@ -73,7 +305,6 @@ func runSSHTests(cfg *Config, vms []*VM, onceResults []*ExecStepResult, globalSt
 	}
 	close(jobs)
 	wg.Wait()
-	fmt.Fprintln(os.Stderr)
 }
 
 // testOne 对单台虚拟机做登录测试，成功后按流水线（exec-list）依次执行各步骤。
@@ -161,7 +392,7 @@ func trySSH(cfg *Config, ip, password string, onceResults []*ExecStepResult, glo
 	}
 
 	// 流水线执行
-	status, services, steps := runPipeline(cfg, client, onceResults, globalStopped)
+	status, services, steps := runPipeline(cfg, client, ip, onceResults, globalStopped)
 	return status, services, steps, nil
 }
 
@@ -189,7 +420,8 @@ func runPipelineOnce(cfg *Config) ([]*ExecStepResult, bool) {
 // runPipeline 对单台已登录的服务器按顺序执行流水线步骤。
 // 本地 once 步骤直接复用阶段一结果；其余步骤在本机或远端执行。
 // 任一步骤失败且 onError=stop 时，该台后续步骤标记 skipped 不再执行。
-func runPipeline(cfg *Config, client *ssh.Client, onceResults []*ExecStepResult, globalStopped bool) (*ServerStatus, []ServiceStatus, []*ExecStepResult) {
+// ip 为实际连接 IP（用于实时进度定位主机，可能是 EIP）。
+func runPipeline(cfg *Config, client *ssh.Client, ip string, onceResults []*ExecStepResult, globalStopped bool) (*ServerStatus, []ServiceStatus, []*ExecStepResult) {
 	steps := cfg.EffectiveSteps()
 	results := make([]*ExecStepResult, 0, len(steps))
 	var status *ServerStatus
@@ -226,6 +458,10 @@ func runPipeline(cfg *Config, client *ssh.Client, onceResults []*ExecStepResult,
 		}
 
 		var res *ExecStepResult
+		// 实时进度：更新该主机当前执行的步骤
+		if sshProgress != nil {
+			sshProgress.setStep(ip, i+1, len(steps), StepName(step, i))
+		}
 		switch step.Type {
 		case "files":
 			res = execFilesStep(client, step, name)
@@ -867,7 +1103,8 @@ func writeScriptLog(dir string, vm *VM, s *ExecStepResult) {
 		vm.Name, vm.IP, s.Name, s.Type, stepResultLabel(s), s.ExitCode, s.Duration, orErrSuffix(s), s.Output)
 	path := filepath.Join(dir, sanitizeFileName(vm.Name)+"_"+sanitizeFileName(vm.IP)+"_"+sanitizeFileName(s.Name)+".log")
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		fmt.Fprintf(os.Stderr, "\n警告: 写入脚本输出 %s 失败: %v\n", path, err)
+		// 进度运行中时先清行再输出警告，避免打断进度条
+		progressPrint(func() { fmt.Fprintf(os.Stderr, "\n警告: 写入脚本输出 %s 失败: %v\n", path, err) })
 	}
 }
 

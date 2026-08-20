@@ -120,31 +120,36 @@ func collectVMs(c *Client, cfg *Config, projects []*Project, allMode bool) ([]*V
 	}
 	pageSize := cfg.Pagination.PageSize
 
-	// 2.1 按资源类型拉取 ECS / 裸金属
+	// 2.1 按资源类型拉取 ECS / 裸金属（各自在取密码/详情前做 IP 过滤，省请求）
 	var vms []*VM
+	var dropped int
 	switch cfg.Resource.Type {
 	case "bms":
-		bms, err := collectBMS(c, cfg, projectSet, allMode, pageSize)
+		bms, d, err := collectBMS(c, cfg, projectSet, allMode, pageSize)
 		if err != nil {
 			return nil, err
 		}
+		dropped += d
 		vms = append(vms, bms...)
 	case "all":
-		ecs, err := collectECS(c, cfg, projectSet, allMode, pageSize)
+		ecs, d, err := collectECS(c, cfg, projectSet, allMode, pageSize)
 		if err != nil {
 			return nil, err
 		}
-		bms, err := collectBMS(c, cfg, projectSet, allMode, pageSize)
+		dropped += d
+		bms, d, err := collectBMS(c, cfg, projectSet, allMode, pageSize)
 		if err != nil {
 			return nil, err
 		}
+		dropped += d
 		vms = append(vms, ecs...)
 		vms = append(vms, bms...)
 	default: // ecs
-		ecs, err := collectECS(c, cfg, projectSet, allMode, pageSize)
+		ecs, d, err := collectECS(c, cfg, projectSet, allMode, pageSize)
 		if err != nil {
 			return nil, err
 		}
+		dropped += d
 		vms = append(vms, ecs...)
 	}
 	if len(vms) == 0 {
@@ -255,17 +260,22 @@ func collectVMs(c *Client, cfg *Config, projects []*Project, allMode bool) ([]*V
 		}
 	}
 
+	// 2.5 IP 筛选统计（配置了 filter 才提示）
+	if filterConfigured(&cfg.Filter) {
+		fmt.Fprintf(os.Stderr, "IP筛选: 共拉取 %d 台，过滤掉 %d 台，保留 %d 台执行\n", dropped+len(vms), dropped, len(vms))
+	}
+
 	return vms, nil
 }
 
-// collectECS 拉取弹性云主机列表并按项目过滤，逐台取密码
-func collectECS(c *Client, cfg *Config, projectSet map[string]bool, allMode bool, pageSize int) ([]*VM, error) {
+// collectECS 拉取弹性云主机列表并按项目/IP 过滤，逐台取密码（过滤后的主机不取密码）
+func collectECS(c *Client, cfg *Config, projectSet map[string]bool, allMode bool, pageSize int) ([]*VM, int, error) {
 	var vms []*VM
 	page := 1
 	for {
 		resp, err := c.describeEcs(cfg.RegionID, page, pageSize)
 		if err != nil {
-			return nil, fmt.Errorf("DescribeEcs 第%d页失败: %w", page, err)
+			return nil, 0, fmt.Errorf("DescribeEcs 第%d页失败: %w", page, err)
 		}
 		for _, item := range resp.List {
 			if !allMode && !projectSet[item.ProjectID] {
@@ -298,11 +308,16 @@ func collectECS(c *Client, cfg *Config, projectSet map[string]bool, allMode bool
 		}
 		page++
 	}
+	// IP 筛选：只保留要执行的主机，后续取密码请求只为保留的主机发起
+	vms, dropped, err := filterVMs(cfg, vms)
+	if err != nil {
+		return nil, 0, err
+	}
 	// 并发获取密码（带进度提示）
 	fetchPasswords(c, cfg, vms, "获取虚拟机密码", func(id string) (string, error) {
 		return c.getEcsPassword(cfg.RegionID, id)
 	})
-	return vms, nil
+	return vms, dropped, nil
 }
 
 // fetchPasswords 并发获取密码，带进度提示
@@ -389,14 +404,14 @@ func fetchBmsDetails(c *Client, cfg *Config, vms []*VM) {
 	fmt.Fprintln(os.Stderr)
 }
 
-// collectBMS 拉取裸金属列表并按项目过滤，逐台取密码与详情（结构化数据盘）
-func collectBMS(c *Client, cfg *Config, projectSet map[string]bool, allMode bool, pageSize int) ([]*VM, error) {
+// collectBMS 拉取裸金属列表并按项目/IP 过滤，逐台取密码与详情（结构化数据盘；过滤后的主机不取）
+func collectBMS(c *Client, cfg *Config, projectSet map[string]bool, allMode bool, pageSize int) ([]*VM, int, error) {
 	var vms []*VM
 	page := 1
 	for {
 		resp, err := c.describeBms(cfg.RegionID, page, pageSize)
 		if err != nil {
-			return nil, fmt.Errorf("DescribeBms 第%d页失败: %w", page, err)
+			return nil, 0, fmt.Errorf("DescribeBms 第%d页失败: %w", page, err)
 		}
 		for _, item := range resp.List {
 			if !allMode && !projectSet[item.ProjectID] {
@@ -429,12 +444,17 @@ func collectBMS(c *Client, cfg *Config, projectSet map[string]bool, allMode bool
 		}
 		page++
 	}
+	// IP 筛选：只保留要执行的主机，后续取密码/详情请求只为保留的主机发起
+	vms, dropped, err := filterVMs(cfg, vms)
+	if err != nil {
+		return nil, 0, err
+	}
 	// 并发获取密码与详情（带进度提示）
 	fetchPasswords(c, cfg, vms, "获取裸金属密码", func(id string) (string, error) {
 		return c.getBmsPassword(cfg.RegionID, id)
 	})
 	fetchBmsDetails(c, cfg, vms)
-	return vms, nil
+	return vms, dropped, nil
 }
 
 // bmsDiskSize 解析裸金属数据盘容量描述（"100"->"100G", "1.92T" 原样保留）

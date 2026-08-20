@@ -19,6 +19,7 @@ type Config struct {
 	RegionID           string        `yaml:"regionId"`           // 区域ID
 	Project            ProjectCfg    `yaml:"project"`
 	Resource           ResourceCfg   `yaml:"resource"`
+	Filter             FilterCfg     `yaml:"filter"` // IP 筛选：选定项目后按 IP 圈定/剔除要执行的主机
 	HTTP               HTTPCfg       `yaml:"http"`
 	Pagination         PaginationCfg `yaml:"pagination"`
 	SSH                SSHCfg        `yaml:"ssh"`
@@ -166,6 +167,10 @@ func loadConfig(path string) (*Config, error) {
 	}
 	// 流水线步骤校验
 	if err := validateExecList(cfg.ExecList); err != nil {
+		return nil, err
+	}
+	// IP 筛选规则校验（CIDR/通配符格式）
+	if err := validateFilter(&cfg.Filter); err != nil {
 		return nil, err
 	}
 	return cfg, nil
