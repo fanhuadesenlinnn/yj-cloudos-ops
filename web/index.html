@@ -137,7 +137,13 @@ tr.clickable:hover td { background:#f7f9ff; }
         <h3>文件管理 <span class="muted">上传的文件放在 <code id="files-dir"></code>，配置里 <code>files</code> 模块的 <code>local</code> 引用 <code>files/文件名</code> 即可推送到服务器</span></h3>
         <div class="row">
           <input type="file" id="file-input" multiple>
-          <button class="pri" onclick="uploadFiles()">上传</button>
+          <button class="pri" id="btn-upload" onclick="uploadFiles()">上传</button>
+        </div>
+        <div id="upload-progress" class="hidden" style="margin-bottom:10px">
+          <div style="background:#eef1f5;border-radius:4px;height:8px;overflow:hidden">
+            <div id="upload-bar" style="background:var(--pri);height:100%;width:0%;transition:width .2s"></div>
+          </div>
+          <div class="muted" id="upload-text" style="margin-top:4px"></div>
         </div>
         <div style="overflow:auto"><table id="files-table"></table></div>
       </div>
@@ -226,6 +232,7 @@ async function enterMain(){
   $('login-view').classList.add('hidden'); $('main-view').classList.remove('hidden');
   await loadSettingsForm();
   await loadConfigs();
+  await loadProfileSelect(); // 运行页配置下拉（此前缺失导致无法选择配置）
   switchTab('run');
 }
 
@@ -264,18 +271,49 @@ async function loadFiles(){
       </tr>`).join('') : '<tr><td colspan="5" class="muted">还没有文件，选择文件后点击「上传」</td></tr>');
   } catch(e){ toast(e.message); }
 }
-async function uploadFiles(){
+// 上传文件：XHR 异步上传（不阻塞页面其他操作），带进度条
+function uploadFiles(){
   const input = $('file-input');
   if (!input.files.length){ toast('请先选择文件'); return; }
   const fd = new FormData();
   for (const f of input.files) fd.append('file', f);
-  try {
-    const r = await fetch('/api/files', {method:'POST', body: fd, headers:{}});
-    if (r.status===401){ showLogin(); throw new Error('未登录'); }
-    if (!r.ok){ throw new Error(await r.text()); }
-    toast('已上传 '+r.uploaded.length+' 个文件');
-    input.value=''; await loadFiles();
-  } catch(e){ toast('上传失败: '+e.message); }
+  const total = input.files.length;
+  const xhr = new XMLHttpRequest();
+  const btn = $('btn-upload');
+  const bar = $('upload-bar'), prog = $('upload-progress'), txt = $('upload-text');
+
+  // 上传进度（只统计已发送字节；多个文件时按总字节估算）
+  xhr.upload.onprogress = e => {
+    if (e.lengthComputable){
+      const pct = Math.round(e.loaded/e.total*100);
+      bar.style.width = pct+'%';
+      txt.textContent = '上传中 '+pct+'%  ('+fmtSize(e.loaded)+'/'+fmtSize(e.total)+')';
+    }
+  };
+  xhr.onload = () => {
+    if (xhr.status === 401){ showLogin(); return; }
+    if (xhr.status >= 400){
+      txt.textContent = '上传失败: '+(xhr.responseText||('HTTP '+xhr.status));
+      bar.style.background = 'var(--bad)';
+      btn.disabled = false;
+      return;
+    }
+    let n = total;
+    try { n = JSON.parse(xhr.responseText).uploaded.length; } catch(e){}
+    bar.style.width = '100%';
+    txt.textContent = '已上传 '+n+' 个文件';
+    setTimeout(()=>{ prog.classList.add('hidden'); bar.style.width='0%'; bar.style.background='var(--pri)'; }, 1500);
+    btn.disabled = false;
+    input.value='';
+    loadFiles();
+  };
+  xhr.onerror = () => { txt.textContent='上传失败: 网络错误'; btn.disabled=false; };
+
+  prog.classList.remove('hidden');
+  txt.textContent = '开始上传 '+total+' 个文件...';
+  btn.disabled = true; // 上传中禁用按钮，防重复提交
+  xhr.open('POST', '/api/files');
+  xhr.send(fd);
 }
 async function downloadFile(name){ window.location = '/api/files/'+encodeURIComponent(name); }
 async function delFile(name){
