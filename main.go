@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 var reDiskSize = regexp.MustCompile(`^([0-9.]+)\s*([TtGgMm])?$`)
@@ -29,6 +30,8 @@ var (
 	webAddr      = flag.String("web-addr", "0.0.0.0:8080", "Web 监听地址")
 	webConfigs   = flag.String("web-configs", "", "Web 配置目录（默认取 settings 里的 configsDir）")
 	webSettings  = flag.String("web-settings", "settings.yaml", "Web 设置文件路径")
+	daemonMode   = flag.Bool("daemon", false, "后台运行（与 -web 搭配）：脱离终端，命令行窗口可关闭，日志写 web.log")
+	stopMode     = flag.Bool("stop", false, "停止后台运行的 Web 实例（读取 web.pid 优雅退出）")
 )
 
 func main() {
@@ -39,9 +42,15 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Web 模式：浏览器管理配置与运行（CLI 模式保持原样）
+	// -stop：停止后台 Web 实例（读 web.pid 优雅退出）
+	if *stopMode {
+		stopWebDaemon(*webSettings)
+		return
+	}
+
+	// Web 模式：浏览器管理配置与运行（CLI 模式保持原样）；-daemon 后台化
 	if *webMode {
-		runWeb(*webAddr, *webConfigs, *webSettings)
+		runWeb(*webAddr, *webConfigs, *webSettings, *daemonMode)
 		return
 	}
 
@@ -130,6 +139,41 @@ func main() {
 			fmt.Fprintf(os.Stderr, "已导出Excel: %s\n", excelPath)
 		}
 	}
+}
+
+// stopWebDaemon 停止后台 Web 实例：读取 web.pid，平台原生方式通知优雅退出。
+func stopWebDaemon(settingsPath string) {
+	path := pidFilePath(settingsPath)
+	info, err := readPIDFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "未找到后台实例（%s 不存在），可能未运行或已退出\n", path)
+		} else {
+			fmt.Fprintf(os.Stderr, "读取 %s 失败: %v\n", path, err)
+		}
+		os.Exit(1)
+	}
+	if !processAlive(info.PID) {
+		fmt.Fprintf(os.Stderr, "后台实例 PID=%d 已不存在（可能是残留的 PID 文件），已清理\n", info.PID)
+		removePIDFile(path)
+		os.Exit(0)
+	}
+	fmt.Fprintf(os.Stderr, "正在停止后台实例 PID=%d ...\n", info.PID)
+	if err := requestShutdown(info); err != nil {
+		fmt.Fprintf(os.Stderr, "停止失败: %v\n", err)
+		os.Exit(1)
+	}
+	// 等待进程退出（最多 5s）
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && processAlive(info.PID) {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if processAlive(info.PID) {
+		fmt.Fprintf(os.Stderr, "已发送退出信号，但进程仍在运行（等待稍后自行退出或手动结束）\n")
+		os.Exit(1)
+	}
+	fmt.Fprintf(os.Stderr, "已停止\n")
+	removePIDFile(path)
 }
 
 // initExampleConfig 生成示例配置文件到指定路径；已存在则不覆盖（返回错误提示）。

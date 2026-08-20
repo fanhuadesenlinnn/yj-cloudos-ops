@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	_ "embed"
 	"encoding/hex"
@@ -111,19 +112,21 @@ func jobSummary(j *Job) map[string]any {
 // ---------- Web 服务 ----------
 
 type webServer struct {
-	mu        sync.Mutex
-	settings  *Settings
+	mu           sync.Mutex
+	settings     *Settings
 	settingsPath string
-	sessions  map[string]time.Time // sessionID -> 过期时间
-	currentJob *Job
-	history   []*Job // 最近 N 次，重启清空
-	hub       *eventHub
+	pidLogFile   string   // 后台模式的日志路径（前台为空，用默认 web.log）
+	sessions     map[string]time.Time // sessionID -> 过期时间
+	currentJob   *Job
+	history      []*Job // 最近 N 次，重启清空
+	hub          *eventHub
 }
 
 // sessionTTL 会话有效期
 const sessionTTL = 12 * time.Hour
 
-func runWeb(addr, configsDir, settingsPath string) {
+// runWeb 启动 Web 服务。daemon=true 时先后台化再启动（父进程拉起子进程后退出）。
+func runWeb(addr, configsDir, settingsPath string, daemon bool) {
 	// 设置（不存在则创建默认 admin/admin）；命令行 -web-configs 优先于 settings 里的配置目录
 	st, err := loadSettings(settingsPath)
 	if err != nil {
@@ -159,6 +162,35 @@ func runWeb(addr, configsDir, settingsPath string) {
 		return nil, fmt.Errorf("发现 %d 个同名项目，请在页面上选择", len(matches))
 	}
 
+	// 后台化：子进程重新启动（去掉 -daemon 参数），父进程退出，命令行窗口关闭
+	if daemon {
+		logPath := filepath.Join(filepath.Dir(settingsPath), "web.log")
+		if err := daemonize(logPath); err != nil {
+			fmt.Fprintf(os.Stderr, "后台化失败: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "已转入后台运行，日志: %s\n", logPath)
+		fmt.Fprintf(os.Stderr, "退出命令: %s -stop（或 Web 页面「退出程序」）\n", os.Args[0])
+		os.Exit(0)
+	}
+
+	// 非后台（前台）也重定向日志到 web.log（便于排查与设置页查看）
+	if logFile, err := openLogFile(filepath.Join(filepath.Dir(settingsPath), "web.log")); err == nil {
+		os.Stdout = logFile
+		os.Stderr = logFile
+		defer logFile.Close()
+	}
+
+	// 后台模式：写 PID 文件（含 shutdown token），供 -stop 定位与优雅退出
+	if !daemon && os.Getenv("YJ_DAEMON") == "1" {
+		token := newShutdownToken()
+		shutdownToken = token
+		if err := writePIDFile(pidFilePath(settingsPath), os.Getpid(), token, addr, filepath.Join(filepath.Dir(settingsPath), "web.log")); err != nil {
+			fmt.Fprintf(os.Stderr, "写入 PID 文件失败: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
 	s := &webServer{
 		settings:     st,
 		settingsPath: settingsPath,
@@ -173,8 +205,32 @@ func runWeb(addr, configsDir, settingsPath string) {
 	fmt.Fprintf(os.Stderr, "  设置文件: %s\n", settingsPath)
 	fmt.Fprintf(os.Stderr, "  配置目录: %s\n", st.ConfigsDir)
 	fmt.Fprintf(os.Stderr, "  文件目录: %s\n", st.FilesDir)
+	fmt.Fprintf(os.Stderr, "  日志文件: %s\n", filepath.Join(filepath.Dir(settingsPath), "web.log"))
 	fmt.Fprintf(os.Stderr, "  登录账号: %s / admin（默认，请尽快修改）\n", st.Auth.Username)
-	if err := http.ListenAndServe(addr, handler); err != nil {
+
+	// 优雅关闭：等待 shutdownCh（/api/shutdown 或 SIGTERM）
+	// Unix：-stop 发 SIGTERM；Windows：-stop 走 /api/shutdown（本机+token）
+	if os.Getenv("YJ_DAEMON") == "1" {
+		go handleSignals()
+	}
+	srv := &http.Server{Addr: addr, Handler: handler}
+	go func() {
+		<-shutdownCh
+		// 停止正在运行的任务（如有）
+		s.mu.Lock()
+		if s.currentJob != nil && s.currentJob.Status == "running" {
+			s.currentJob.Status = "failed"
+			s.currentJob.Error = "程序退出，任务已终止"
+		}
+		s.mu.Unlock()
+		removePIDFile(pidFilePath(s.settingsPath))
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+		os.Exit(0)
+	}()
+
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		fmt.Fprintf(os.Stderr, "HTTP 服务启动失败: %v\n", err)
 		os.Exit(1)
 	}
@@ -197,7 +253,86 @@ func (s *webServer) routes() http.Handler {
 	mux.HandleFunc("/api/export", s.auth(s.handleExport))
 	mux.HandleFunc("/api/files", s.auth(s.handleFiles))
 	mux.HandleFunc("/api/files/", s.auth(s.handleFileItem))
+	mux.HandleFunc("/api/log", s.auth(s.handleLog))
+	mux.HandleFunc("/api/shutdown", s.handleShutdown)
 	return mux
+}
+
+// ---------- 优雅关闭（-stop / /api/shutdown） ----------
+
+// shutdownToken 后台实例的 shutdown token（-stop 校验用），非后台模式为空
+var shutdownToken string
+
+// shutdownCh 触发优雅关闭的通道：/api/shutdown 与 SIGTERM 处理共用
+var shutdownCh = make(chan struct{}, 1)
+
+// httpShutdownRequest 向本机 Web 端口发带 token 的 shutdown 请求（Windows -stop 用）
+func httpShutdownRequest(addr, token string) error {
+	req, err := http.NewRequest("POST", "http://"+addr+"/api/shutdown", strings.NewReader(`{"token":"`+token+`"}`))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("shutdown 请求失败: %d %s", resp.StatusCode, body)
+	}
+	return nil
+}
+
+// handleShutdown 优雅关闭：校验 token -> 停任务 -> 关 HTTP -> 退进程。
+// 不带 auth（-stop 走本地请求，无法带 session cookie）。
+func (s *webServer) handleShutdown(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "仅支持 POST", http.StatusMethodNotAllowed)
+		return
+	}
+	// 仅接受本机请求
+	if r.RemoteAddr != "" {
+		host, _, err := splitHostPort(r.RemoteAddr)
+		if err == nil && host != "127.0.0.1" && host != "::1" && host != "localhost" {
+			http.Error(w, "仅允许本机关闭", http.StatusForbidden)
+			return
+		}
+	}
+	var req struct {
+		Token string `json:"token"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	// 校验：已登录 session 或正确 token 二者其一即可
+	authorized := s.validSession(r)
+	if shutdownToken != "" && req.Token == shutdownToken {
+		authorized = true
+	}
+	if !authorized {
+		http.Error(w, "未授权（需要登录或 token）", http.StatusForbidden)
+		return
+	}
+	jsonResponse(w, map[string]any{"ok": true, "msg": "正在退出..."})
+	// 触发优雅关闭（异步返回响应后关闭）
+	go func() { shutdownCh <- struct{}{} }()
+}
+
+// validSession 校验请求是否携带有效登录 session
+func (s *webServer) validSession(r *http.Request) bool {
+	c, err := r.Cookie("session")
+	if err != nil {
+		return false
+	}
+	s.mu.Lock()
+	exp, ok := s.sessions[c.Value]
+	if ok && time.Now().After(exp) {
+		delete(s.sessions, c.Value)
+		ok = false
+	}
+	s.mu.Unlock()
+	return ok
 }
 
 // ---------- 静态页 + 鉴权 ----------
@@ -214,19 +349,7 @@ func (s *webServer) handleStatic(w http.ResponseWriter, r *http.Request) {
 // auth 鉴权中间件：除 /api/login 外均需有效 session
 func (s *webServer) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		c, err := r.Cookie("session")
-		if err != nil {
-			http.Error(w, "未登录", http.StatusUnauthorized)
-			return
-		}
-		s.mu.Lock()
-		exp, ok := s.sessions[c.Value]
-		if ok && time.Now().After(exp) {
-			delete(s.sessions, c.Value)
-			ok = false
-		}
-		s.mu.Unlock()
-		if !ok {
+		if !s.validSession(r) {
 			http.Error(w, "会话已过期，请重新登录", http.StatusUnauthorized)
 			return
 		}
@@ -874,6 +997,48 @@ func (s *webServer) handleFileItem(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "不支持的方法", http.StatusMethodNotAllowed)
 	}
+}
+
+// ---------- 日志 API ----------
+
+// handleLog 查看日志尾部 / 下载完整日志
+func (s *webServer) handleLog(w http.ResponseWriter, r *http.Request) {
+	logPath := s.logFilePath()
+	if !fileExists(logPath) {
+		http.Error(w, "日志文件不存在（尚未产生日志）", http.StatusNotFound)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		// 下载完整日志
+		w.Header().Set("Content-Disposition", `attachment; filename="web.log"`)
+		http.ServeFile(w, r, logPath)
+	case http.MethodPost:
+		// 查看尾部 N 行（设置页实时刷新用）
+		n := strToInt(r.URL.Query().Get("lines"))
+		if n <= 0 {
+			n = 200
+		}
+		if n > 5000 {
+			n = 5000
+		}
+		tail, err := logTail(logPath, n)
+		if err != nil {
+			http.Error(w, "读取日志失败: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		jsonResponse(w, map[string]any{"tail": tail, "path": logPath})
+	default:
+		http.Error(w, "不支持的方法", http.StatusMethodNotAllowed)
+	}
+}
+
+// logFilePath 日志文件路径：后台模式写入 web.pid 里的路径；前台默认 ./web.log
+func (s *webServer) logFilePath() string {
+	if s.pidLogFile != "" {
+		return s.pidLogFile
+	}
+	return filepath.Join(filepath.Dir(s.settingsPath), "web.log")
 }
 
 // ---------- 工具 ----------

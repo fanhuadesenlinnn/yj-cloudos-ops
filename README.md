@@ -50,7 +50,23 @@ CloudOS 7.0 虚拟机检查工具（Golang）
 - 运行历史保存在内存，重启即清空
 - 鉴权：除登录接口与静态页面外，所有 API 需要登录会话（Cookie）
 
-Web 模式相关参数：`-web` / `-web-addr`（默认 0.0.0.0:8080）/ `-web-configs` / `-web-settings`（默认 settings.yaml）。
+### 后台运行与退出
+
+```bash
+# 后台运行（Windows/Linux/macOS 各自系统原生方式脱离终端）：
+# 命令行窗口可关闭，程序继续运行，日志写入 web.log
+./yj-cloudos-ops -web -web-addr 0.0.0.0:8080 -daemon
+
+# 停止后台实例（读取 web.pid，优雅退出：停任务->关HTTP->退进程）
+./yj-cloudos-ops -stop
+```
+
+- **后台化原理**：Windows 用 `DETACHED_PROCESS` 脱离控制台；Linux/macOS 用 `Setsid` 新会话，不受终端关闭/SIGHUP 影响
+- **PID 文件** `web.pid`（与 settings.yaml 同目录）：记录进程ID、shutdown token、端口；`-stop` 据此定位
+- **退出方式**：Web 页面「退出程序」按钮（需登录）或命令行 `-stop`（Unix 发 SIGTERM / Windows 走本机+token 的 shutdown 请求）；-stop 未运行时会提示
+- **日志**：程序自动写 `web.log`（前台/后台都写），设置页可查看尾部与下载
+
+Web 模式相关参数：`-web` / `-web-addr`（默认 0.0.0.0:8080）/ `-web-configs` / `-web-settings`（默认 settings.yaml）/ `-daemon` / `-stop`。
 
 ## 构建
 

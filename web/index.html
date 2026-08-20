@@ -76,7 +76,8 @@ tr.clickable:hover td { background:#f7f9ff; }
         <div class="tab" data-tab="files" onclick="switchTab('files')">文件</div>
         <div class="tab" data-tab="settings" onclick="switchTab('settings')">设置</div>
         <div class="tab" data-tab="help" onclick="switchTab('help')">帮助</div>
-        <div class="tab" onclick="logout()">退出</div>
+        <div class="tab" style="color:var(--bad)" onclick="shutdownApp()">退出程序</div>
+        <div class="tab" onclick="logout()">退出登录</div>
       </div>
     </div>
 
@@ -157,6 +158,15 @@ tr.clickable:hover td { background:#f7f9ff; }
         <div class="row"><label style="width:80px">历史保留</label><input id="set-history" type="number" min="1" max="100" style="width:80px"><span class="muted">条（重启即清空）</span></div>
         <button class="pri" onclick="saveSettings()">保存设置</button>
       </div>
+      <div class="card">
+        <h3>运行日志 <span class="muted">(web.log)</span></h3>
+        <div class="row">
+          <button onclick="refreshLog()">刷新</button>
+          <button onclick="downloadLog()">下载日志</button>
+          <span class="muted" id="log-path"></span>
+        </div>
+        <pre id="log-view" class="help-pre" style="height:240px;white-space:pre-wrap">（登录后点击刷新查看）</pre>
+      </div>
     </div>
 
     <!-- 帮助 -->
@@ -191,6 +201,26 @@ async function login(){
   } catch(e){ toast(e.message); }
 }
 function logout(){ fetch('/api/logout', {method:'POST'}); showLogin(); }
+
+// 退出程序：确认后优雅关闭（停任务->关HTTP->退进程）
+async function shutdownApp(){
+  if (!confirm('确定退出程序吗？\n\n当前正在运行的任务将被终止，Web 服务将关闭。')) return;
+  try {
+    await fetch('/api/shutdown', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+    toast('程序正在退出...');
+    setTimeout(()=>{ document.body.innerHTML='<div style="text-align:center;margin-top:120px;color:#888">程序已退出，可关闭此页面。</div>'; }, 800);
+  } catch(e){ toast('退出请求失败: '+e.message); }
+}
+
+// 运行日志查看/下载
+async function refreshLog(){
+  try {
+    const r = await api('/api/log', {method:'POST'});
+    $('log-view').textContent = r.tail || '（日志为空）';
+    $('log-path').textContent = r.path;
+  } catch(e){ $('log-view').textContent = e.message; }
+}
+function downloadLog(){ window.location = '/api/log'; }
 
 async function enterMain(){
   $('login-view').classList.add('hidden'); $('main-view').classList.remove('hidden');
