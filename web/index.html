@@ -30,6 +30,8 @@ table { width:100%; border-collapse:collapse; font-size:13px; }
 th, td { border:1px solid var(--line); padding:6px 8px; text-align:left; white-space:nowrap; }
 th { background:#f0f2f5; }
 tr.clickable { cursor:pointer; }
+.sticky-right{ position:sticky; right:0; background:var(--card,#fff); box-shadow:-3px 0 6px rgba(0,0,0,.06); z-index:1; }
+th.sticky-right{ background:#f0f2f5; }
 tr.clickable:hover td { background:#f7f9ff; }
 .badge { display:inline-block; padding:1px 7px; border-radius:10px; font-size:12px; }
 .ok { background:#e6f7ec; color:var(--ok); }
@@ -289,7 +291,7 @@ async function loadFiles(){
     $('files-crumb').innerHTML = crumb.length ? ' / '+crumb.join(' / ') : '（根目录）';
     $('files-back').style.visibility = filesCur ? 'visible' : 'hidden';
     const items = res.items || [];
-    tb.innerHTML = '<tr><th>类型</th><th>名称</th><th>大小</th><th>修改时间</th><th>引用路径</th><th>操作</th></tr>' +
+    tb.innerHTML = '<tr><th>类型</th><th>名称</th><th>大小</th><th>修改时间</th><th>引用路径</th><th class="sticky-right">操作</th></tr>' +
       (items.length ? items.map(f=>{
         const icon = f.isDir ? '📁' : '📄';
         const nameCell = f.isDir
@@ -301,7 +303,7 @@ async function loadFiles(){
           <td>${f.isDir?'—':fmtSize(f.size)}</td>
           <td>${fmtTime(f.modTime)}</td>
           <td><code>${esc(f.ref)}</code> <button onclick="copyRef('${escAttr(f.path)}',${f.isDir})">复制</button></td>
-          <td><button onclick="downloadFile('${escAttr(f.path)}')">${f.isDir?'打包下载':'下载'}</button>
+          <td class="sticky-right"><button onclick="downloadFile('${escAttr(f.path)}')">${f.isDir?'打包下载':'下载'}</button>
               <button class="danger" onclick="delFile('${escAttr(f.path)}',${f.isDir})">删除</button></td>
         </tr>`;
       }).join('') : '<tr><td colspan="6" class="muted">目录为空，选择文件/文件夹后点击「上传」</td></tr>');
