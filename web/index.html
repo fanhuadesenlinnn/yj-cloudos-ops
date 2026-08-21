@@ -49,6 +49,9 @@ tr.clickable:hover td { background:#f7f9ff; }
 .help-table { font-size:13px; margin:8px 0; }
 .help-table th { background:#f0f2f5; }
 .help-pre { background:#0f1115; color:#d4d4d4; border-radius:6px; padding:10px; font-family:ui-monospace,Menlo,monospace; font-size:12px; overflow:auto; white-space:pre; }
+.help-pre .k{ color:#7db9ff; font-weight:600; }
+.help-pre .s{ color:#7bd88f; }
+.help-pre .c{ color:#8a94a6; font-style:italic; }
 #help-content code { background:#eef1f5; border-radius:3px; padding:0 4px; font-family:ui-monospace,Menlo,monospace; font-size:12px; }
 #help-content h3 { margin:14px 0 6px; } #help-content h4 { margin:10px 0 4px; } #help-content h5 { margin:8px 0 4px; }
 #help-content p, #help-content li { line-height:1.7; }
@@ -622,7 +625,8 @@ function switchTab(name){
   if (name==='help') renderHelp();
 }
 
-// 精简版 demo 配置：新建配置时自动填充，替换凭证/项目后即可保存运行
+// 完整 Demo 配置：帮助页展示 + 新建配置时自动填充，替换凭证/项目后即可保存运行
+// 覆盖全部模块：files(push/pull) / command(local+remote) / services / status / output / raw
 const DEMO_YAML = `# 描述: 我的配置（可修改，作为配置列表中的简介）
 endpoint: "https://k8sVIP:30990"     # API 服务地址（私有云一般为 https://k8sVIP:30990）
 accessKeyId: "your-access-key-id"     # 平台凭证：控制台 -> 统一身份认证 -> 访问秘钥
@@ -657,10 +661,10 @@ ssh:
 # 配置步骤则完全按步骤执行。
 # ============================================================
 execList:
-  # files 模块：传输文件/文件夹（push 本机->远端 / pull 远端->本机）
+  # ---- files 模块：传输文件/文件夹（push 本机->远端 / pull 远端->本机）----
   - name: "分发安装包"
     type: files
-    target: push        # 必填：push / pull
+    target: push        # 必填：push / pull（传输方向）
     overwrite: true     # 覆盖远端同名文件（缺省 false=已存在则跳过）
     files:
       - local: "dist/app.tar.gz"        # 本机源（文件/文件夹）
@@ -669,25 +673,39 @@ execList:
       - local: "configs/"               # 本机文件夹：递归传输保持结构
         remote: "/opt/myapp/configs"
 
-  # command 模块：在远端执行命令/脚本（内容走 stdin 传 bash -s，无转义问题）
+  # ---- command 模块：执行命令/脚本（target: local 本机 / remote 远端，缺省 remote）----
+  - name: "本地构建打包"
+    type: command
+    target: local       # 本机执行（配合 run: once 只跑一次，不每台重复）
+    run: once
+    command: "go build -o dist/app ."
+
   - name: "远端部署"
     type: command
-    target: remote      # local(本机) / remote(远端，默认)
+    target: remote      # 在每台服务器上经 SSH 执行（内容走 stdin 传 bash -s，无转义问题）
     workdir: "/opt/myapp"   # 可选：先 cd 到该目录
     scriptPath: "scripts/deploy.sh"  # 或 command: 单行 / script: 内嵌多行
     timeout: 60s
     onError: stop       # stop=失败终止本台后续步骤(默认) / continue=继续
 
-  # services 模块：检查服务运行状态（如 sshd/docker）
+  # ---- services 模块：检查服务运行状态（如 sshd/docker）----
   - name: "检查服务"
     type: services
     services: ["sshd", "docker"]
     onError: continue
 
-  # status 模块：采集服务器运行状态（OS/负载/CPU/内存/磁盘）
+  # ---- status 模块：采集服务器运行状态（OS/负载/CPU/内存/磁盘）----
   - name: "采集运行状态"
     type: status
     onError: continue
+
+  # ---- files 模块 pull（远端 -> 本机，收集/下载文件）----
+  # - name: "收集日志"
+  #   type: files
+  #   target: pull
+  #   files:
+  #     - remote: "/var/log/app/"   # 远端源（文件夹：递归拉取保持结构）
+  #       local: "logs/app/"        # 本机目标目录
 
 # 输出：dir 留空默认 files/out/results；scriptDir 留空默认 files/out/scriptdir
 # raw 原始请求数据默认不保存，显式开启 raw.enabled: true 后才保存到 files/out/raw
@@ -751,15 +769,50 @@ const HELP_MD = `# 配置说明
 
 ## Web 模式
 
-- 新建配置会自动填充精简 demo，替换凭证/项目后即可保存运行。
+- 新建配置会自动填充上方完整 Demo（含全部模块与注释），替换凭证/项目后即可保存运行。
 - 一次只跑一个任务；同名多项目时页面下拉选择。
 - 运行结果保留最近 N 条（内存，重启清空），可下载导出的 Excel。
 `;
 
+// YAML 简单着色（帮助页 Demo 展示用）：键蓝、字符串绿、注释灰
+function hlYAML(line){
+  let s = esc(line);
+  let prefix = '';
+  const lm = s.match(/^(\s*- )/);
+  if (lm){ prefix = lm[1]; s = s.slice(lm[1].length); }
+  const m = s.match(/^([A-Za-z][\w.-]*)(\s*:)(\s*)(.*)$/);
+  if (m){
+    let val = m[4], rest = '';
+    const ci = val.indexOf('#');
+    if (ci >= 0){ rest = val.slice(ci); val = val.slice(0, ci); }
+    let valHtml = esc(val.trim());
+    if (valHtml && (/^".*"$/.test(valHtml) || /^[0-9][\w.:]*$/.test(valHtml) || /^[A-Za-z][A-Za-z0-9_-]*$/.test(valHtml))){
+      valHtml = '<span class="s">'+valHtml+'</span>';
+    }
+    return prefix + '<span class="k">'+m[1]+'</span>'+m[2]+m[3]+valHtml + (rest ? ' <span class="c">'+esc(rest)+'</span>' : '');
+  }
+  if (s.trim().startsWith('#')) return prefix + '<span class="c">'+esc(line)+'</span>';
+  return prefix + s;
+}
+
+// 复制完整 Demo 配置到剪贴板
+async function copyDemo(){
+  try { await navigator.clipboard.writeText(DEMO_YAML); toast('已复制完整 Demo 配置'); }
+  catch(e){ toast('复制失败: '+e.message); }
+}
+
 // 极简 Markdown 渲染：标题/表格/代码/列表/粗体/段落
 function renderHelp(){
+  // 顶部先展示完整 Demo 配置（含全部模块示例与注释，替换凭证/项目后即可运行）
+  const demoHtml = '<div class="card" style="margin-bottom:12px">' +
+    '<h3 style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">完整 Demo 配置 ' +
+    '<span class="muted">（覆盖全部模块，替换凭证/项目后即可运行，可直接复制到「新建配置」）</span>' +
+    '<button style="margin-left:auto" onclick="copyDemo()">复制 Demo</button></h3>' +
+    '<pre class="help-pre">' + DEMO_YAML.split('\n').map(hlYAML).join('\n') + '</pre>' +
+    '<div class="muted" style="margin-top:8px">提示：不配置 execList 时默认执行 status->services；execList: [] 只测 SSH 连通性；以下为各模块分项说明。</div>' +
+    '</div>';
   const lines = HELP_MD.split('\n');
-  let html = '';
+  let html = demoHtml;
   let inTable = false;
   let inCode = false;
   let inList = false;
