@@ -65,7 +65,12 @@ func TestProgressSinkCalledInRunSSHTests(t *testing.T) {
 		{Name: "h2", IP: "127.0.0.1", Password: "Test@12345"},
 		{Name: "h3", IP: "127.0.0.1", Password: "Test@12345"},
 	}
-	runSSHTests(cfg, vms, nil, false, prog, func(vm *VM) { vmLogs = append(vmLogs, vm.SSHResult) }, false)
+	runSSHTests(cfg, vms, nil, false, prog, func(vm *VM) {
+		// onVM 由多个 worker 并发调用，append 需加锁（无锁 append 会丢数据，导致 CI 偶发失败）
+		mu.Lock()
+		vmLogs = append(vmLogs, vm.SSHResult)
+		mu.Unlock()
+	}, false)
 
 	if len(vmLogs) != 3 {
 		t.Errorf("onVM 应每台调用一次: %d", len(vmLogs))
