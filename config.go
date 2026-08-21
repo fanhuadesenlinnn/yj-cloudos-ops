@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -72,7 +73,8 @@ type StepUploadFile struct {
 }
 
 type RawCfg struct {
-	Dir string `yaml:"dir"` // 接口原始返回数据保存目录，留空则不保存
+	Enabled bool   `yaml:"enabled"` // 独立开关：显式 true 才保存接口原始返回数据（默认 false 不保存）
+	Dir     string `yaml:"dir"`     // 原始数据保存目录；开启后留空默认 files/out/raw
 }
 
 type ProjectCfg struct {
@@ -106,8 +108,8 @@ type SSHCfg struct {
 
 type OutputCfg struct {
 	ShowPassword bool   `yaml:"showPassword"` // 屏幕是否显示密码，默认 true
-	Dir          string `yaml:"dir"`         // 导出目录（相对/绝对），留空则不导出；文件名自动生成: <配置名>_<时间戳>.xlsx
-	ScriptDir    string `yaml:"scriptDir"`    // 脚本输出落盘目录（留空不落盘），目录结构 scriptDir/<运行时间戳>/<机器名>_<IP>.log
+	Dir          string `yaml:"dir"`         // Excel 导出目录（相对/绝对）；留空默认 files/out/results；文件名自动生成: <配置名>_<时间戳>.xlsx
+	ScriptDir    string `yaml:"scriptDir"`    // 脚本输出落盘目录；留空默认 files/out/scriptdir；目录结构 scriptDir/<运行时间戳>/<机器名>_<IP>.log
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -171,6 +173,16 @@ func loadConfig(path string) (*Config, error) {
 	// IP 筛选规则校验（CIDR/通配符格式）
 	if err := validateFilter(&cfg.Filter); err != nil {
 		return nil, err
+	}
+	// 输出目录默认值：结果/脚本输出默认开启（files/out 下），原始请求需显式开启
+	if cfg.Output.Dir == "" {
+		cfg.Output.Dir = filepath.Join("files", "out", "results")
+	}
+	if cfg.Output.ScriptDir == "" {
+		cfg.Output.ScriptDir = filepath.Join("files", "out", "scriptdir")
+	}
+	if cfg.Raw.Enabled && cfg.Raw.Dir == "" {
+		cfg.Raw.Dir = filepath.Join("files", "out", "raw")
 	}
 	return cfg, nil
 }

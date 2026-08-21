@@ -21,17 +21,18 @@ var exampleConfigYAML string
 
 var (
 	version      = "dev"
-	configPath   = flag.String("c", "config.yaml", "YAML 配置文件路径")
+	configPath   = flag.String("c", "configs/demo.yaml", "YAML 配置文件路径（默认 configs/demo.yaml）")
 	showVer      = flag.Bool("v", false, "显示版本号")
 	listRegions  = flag.Bool("list-regions", false, "列出账号可见的区域ID（ProductCode=VM），用于填写 regionId")
 	listProjects = flag.Bool("list-projects", false, "列出账号可见的项目，用于填写 project.name")
-	initConfig   = flag.Bool("init", false, "生成一份带注释的示例配置文件（内容与 config.example.yaml 一致）")
+	initConfig   = flag.Bool("init", false, "生成一份带注释的示例配置文件到 configs 目录（默认 configs/demo.yaml）")
 	webMode      = flag.Bool("web", false, "启动 Web 模式（浏览器管理配置/运行/导出）")
-	webAddr      = flag.String("web-addr", "0.0.0.0:8080", "Web 监听地址")
+	webAddr      = flag.String("web-addr", "", "Web 监听地址（默认取 settings.yaml 中的 addr，再缺省 0.0.0.0:8080）")
 	webConfigs   = flag.String("web-configs", "", "Web 配置目录（默认取 settings 里的 configsDir）")
 	webSettings  = flag.String("web-settings", "settings.yaml", "Web 设置文件路径")
 	daemonMode   = flag.Bool("daemon", false, "后台运行（与 -web 搭配）：脱离终端，命令行窗口可关闭，日志写 web.log")
 	stopMode     = flag.Bool("stop", false, "停止后台运行的 Web 实例（读取 web.pid 优雅退出）")
+	serviceMode  = flag.String("service", "", "Windows 服务管理（仅 Windows）: install 安装 / uninstall 卸载 / run 以服务运行")
 )
 
 func main() {
@@ -48,6 +49,34 @@ func main() {
 		return
 	}
 
+	// Windows 服务管理（-service install / uninstall / run）
+	if *serviceMode != "" {
+		switch *serviceMode {
+		case "install":
+			if err := installService(*webSettings); err != nil {
+				fmt.Fprintf(os.Stderr, "安装服务失败: %v\n", err)
+				os.Exit(1)
+			}
+			os.Exit(0)
+		case "uninstall":
+			if err := uninstallService(); err != nil {
+				fmt.Fprintf(os.Stderr, "卸载服务失败: %v\n", err)
+				os.Exit(1)
+			}
+			os.Exit(0)
+		case "run":
+			// 由服务控制管理器拉起（net start），直接跑服务主体
+			if err := runWebAsService(*webSettings); err != nil {
+				fmt.Fprintf(os.Stderr, "服务运行失败: %v\n", err)
+				os.Exit(1)
+			}
+			os.Exit(0)
+		default:
+			fmt.Fprintf(os.Stderr, "-service 取值非法: %q（支持 install / uninstall / run）\n", *serviceMode)
+			os.Exit(1)
+		}
+	}
+
 	// -daemon 必须与 -web 搭配使用（-daemon 只是后台化 Web 的修饰参数，单独用无意义）
 	if *daemonMode && !*webMode {
 		fmt.Fprintf(os.Stderr, "-daemon 必须与 -web 搭配使用\n\n")
@@ -60,11 +89,21 @@ func main() {
 
 	// Web 模式：浏览器管理配置与运行（CLI 模式保持原样）；-daemon 后台化
 	if *webMode {
-		runWeb(*webAddr, *webConfigs, *webSettings, *daemonMode)
+		// 先加载 settings 获取端口，命令行 -web-addr 优先
+		st, err := loadSettings(*webSettings)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "加载设置失败: %v\n", err)
+			os.Exit(1)
+		}
+		addr := *webAddr
+		if addr == "" {
+			addr = st.Addr
+		}
+		runWeb(addr, *webConfigs, *webSettings, *daemonMode)
 		return
 	}
 
-	// -init：生成示例配置文件（已存在则不覆盖）
+	// -init：生成示例配置文件（已存在则不覆盖），默认生成到 configs 目录
 	if *initConfig {
 		if err := initExampleConfig(*configPath); err != nil {
 			fmt.Fprintf(os.Stderr, "生成示例配置失败: %v\n", err)
@@ -105,7 +144,7 @@ func main() {
 		os.Exit(1)
 	}
 	if allMode {
-		fmt.Fprintf(os.Stderr, "模式: 检查全部项目\n")
+		logLine("模式: 检查全部项目")
 	}
 
 	// 2. 拉取虚拟机
@@ -114,7 +153,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "获取虚拟机失败: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Fprintf(os.Stderr, "共 %d 台服务器\n", len(vms))
+	logLine(fmt.Sprintf("共 %d 台服务器", len(vms)))
 	if len(vms) == 0 {
 		os.Exit(0)
 	}
@@ -125,14 +164,14 @@ func main() {
 		if !StepIsLocal(step) || StepRunMode(step) != "once" {
 			continue
 		}
-		fmt.Fprintf(os.Stderr, "[流水线] 本地步骤: %s\n", StepName(step, i))
+		logLine("[流水线] 本地步骤: " + StepName(step, i))
 	}
 	onceResults, globalStopped := runPipelineOnce(cfg)
 	for i, res := range onceResults {
 		if res == nil {
 			continue
 		}
-		fmt.Fprintf(os.Stderr, "[流水线] 本地步骤完成: %s -> %s（%s）\n", StepName(cfg.EffectiveSteps()[i], i), stepResultLabel(res), res.Duration)
+		logLine(fmt.Sprintf("[流水线] 本地步骤完成: %s -> %s（%s）", StepName(cfg.EffectiveSteps()[i], i), stepResultLabel(res), res.Duration))
 	}
 
 	// 3. SSH 登录测试 + 流水线步骤执行（并发，进度输出到 stderr）
@@ -144,9 +183,9 @@ func main() {
 	}
 	if excelPath := autoExcelPath(profile, cfg); excelPath != "" {
 		if err := exportExcel(excelPath, vms); err != nil {
-			fmt.Fprintf(os.Stderr, "导出Excel失败: %v\n", err)
+			logLine(fmt.Sprintf("导出Excel失败: %v", err))
 		} else {
-			fmt.Fprintf(os.Stderr, "已导出Excel: %s\n", excelPath)
+			logLine("已导出Excel: " + excelPath)
 		}
 	}
 }
@@ -262,7 +301,7 @@ func collectVMs(c *Client, cfg *Config, projects []*Project, allMode bool) ([]*V
 	for {
 		resp, err := c.describeEnis(cfg.RegionID, eniPage, pageSize)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "警告: DescribeEnis 第%d页失败: %v（MAC 可能缺失）\n", eniPage, err)
+			logLine(fmt.Sprintf("警告: DescribeEnis 第%d页失败: %v（MAC 可能缺失）", eniPage, err))
 			break
 		}
 		for _, e := range resp.List {
@@ -361,7 +400,7 @@ func collectVMs(c *Client, cfg *Config, projects []*Project, allMode bool) ([]*V
 
 	// 2.5 IP 筛选统计（配置了 filter 才提示）
 	if filterConfigured(&cfg.Filter) {
-		fmt.Fprintf(os.Stderr, "IP筛选: 共拉取 %d 台，过滤掉 %d 台，保留 %d 台执行\n", dropped+len(vms), dropped, len(vms))
+		logLine(fmt.Sprintf("IP筛选: 共拉取 %d 台，过滤掉 %d 台，保留 %d 台执行", dropped+len(vms), dropped, len(vms)))
 	}
 
 	return vms, nil
@@ -425,6 +464,7 @@ func fetchPasswords(c *Client, cfg *Config, vms []*VM, label string, get func(id
 	if total == 0 {
 		return
 	}
+	logLine(fmt.Sprintf("开始%s（共 %d 台，并发 %d）", label, total, cfg.HTTPWorkers()))
 	jobs := make(chan int)
 	var wg sync.WaitGroup
 	var done int64
@@ -436,12 +476,15 @@ func fetchPasswords(c *Client, cfg *Config, vms []*VM, label string, get func(id
 			for idx := range jobs {
 				pw, err := get(vms[idx].ID)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "\n警告: 获取 %s 密码失败: %v\n", vms[idx].Name, err)
+					logLine(fmt.Sprintf("警告: 获取 %s 密码失败: %v", vms[idx].Name, err))
 				} else {
 					vms[idx].Password = pw
 				}
 				n := atomic.AddInt64(&done, 1)
 				fmt.Fprintf(os.Stderr, "\r%s: %d/%d", label, n, total)
+				if runLog != nil {
+					runLog(fmt.Sprintf("%s: %d/%d", label, n, total))
+				}
 			}
 		}()
 	}
@@ -451,6 +494,9 @@ func fetchPasswords(c *Client, cfg *Config, vms []*VM, label string, get func(id
 	close(jobs)
 	wg.Wait()
 	fmt.Fprintln(os.Stderr)
+	if runLog != nil {
+		runLog(fmt.Sprintf("%s完成: %d/%d", label, total, total))
+	}
 }
 
 // fetchBmsDetails 并发获取裸金属详情（系统盘/数据盘）
@@ -471,7 +517,7 @@ func fetchBmsDetails(c *Client, cfg *Config, vms []*VM) {
 				vm := vms[idx]
 				detail, err := c.detailBms(cfg.RegionID, vm.ID)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "\n警告: 获取 %s 详情失败: %v\n", vm.Name, err)
+					logLine(fmt.Sprintf("警告: 获取 %s 详情失败: %v", vm.Name, err))
 				} else {
 					if detail.SysDisk != "" {
 						vms[idx].SysDiskDesc = detail.SysDisk
@@ -492,6 +538,9 @@ func fetchBmsDetails(c *Client, cfg *Config, vms []*VM) {
 				}
 				n := atomic.AddInt64(&done, 1)
 				fmt.Fprintf(os.Stderr, "\r%s: %d/%d", "获取裸金属详情", n, total)
+				if runLog != nil {
+					runLog(fmt.Sprintf("获取裸金属详情: %d/%d", n, total))
+				}
 			}
 		}()
 	}
@@ -501,6 +550,9 @@ func fetchBmsDetails(c *Client, cfg *Config, vms []*VM) {
 	close(jobs)
 	wg.Wait()
 	fmt.Fprintln(os.Stderr)
+	if runLog != nil {
+		runLog(fmt.Sprintf("获取裸金属详情完成: %d/%d", total, total))
+	}
 }
 
 // collectBMS 拉取裸金属列表并按项目/IP 过滤，逐台取密码与详情（结构化数据盘；过滤后的主机不取）

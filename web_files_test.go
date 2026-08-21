@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -53,13 +54,19 @@ func TestFileUploadListDownloadDelete(t *testing.T) {
 
 	// 列表
 	rec2, _ := doJSON(t, h, cookie, "GET", "/api/files", "")
-	var list []map[string]any
-	json.Unmarshal(rec2.Body.Bytes(), &list)
-	if len(list) != 2 {
-		t.Fatalf("列表应有 2 个文件: %v", list)
+	var body struct {
+		Dir   string           `json:"dir"`
+		Items []map[string]any `json:"items"`
+	}
+	json.Unmarshal(rec2.Body.Bytes(), &body)
+	if body.Dir != "" {
+		t.Errorf("根目录 dir 应为空: %q", body.Dir)
+	}
+	if len(body.Items) != 2 {
+		t.Fatalf("列表应有 2 个文件: %v", body.Items)
 	}
 	byName := map[string]map[string]any{}
-	for _, f := range list {
+	for _, f := range body.Items {
 		byName[fmt.Sprint(f["name"])] = f
 	}
 	if byName["app.tar.gz"]["ref"] != "files/app.tar.gz" {
@@ -67,6 +74,9 @@ func TestFileUploadListDownloadDelete(t *testing.T) {
 	}
 	if byName["deploy.sh"]["size"] != float64(len("#!/bin/sh\necho hi\n")) {
 		t.Errorf("大小错误: %v", byName["deploy.sh"]["size"])
+	}
+	if byName["app.tar.gz"]["isDir"] != false {
+		t.Errorf("文件 isDir 应为 false: %v", byName["app.tar.gz"]["isDir"])
 	}
 
 	// 下载
@@ -90,6 +100,135 @@ func TestFileUploadListDownloadDelete(t *testing.T) {
 	rec5, _ := doJSON(t, h, cookie, "DELETE", "/api/files/app.tar.gz", "")
 	if rec5.Code != http.StatusNotFound {
 		t.Errorf("删除不存在文件应 404: %d", rec5.Code)
+	}
+}
+
+// 文件夹：子目录浏览 / 上传到子目录 / 文件夹打包下载(zip) / 递归删除
+func TestFileFolderBrowseUploadZipDelete(t *testing.T) {
+	s, h, _ := newTestWebServer(t)
+	cookie := doLogin(t, h)
+	filesDir := s.settings.FilesDir
+
+	// 上传文件夹：每个文件对应一个 path 字段（webkitRelativePath，含所选文件夹名），
+	// 按顺序一一对应，后端保持目录结构
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	for _, pair := range [][2]string{{"清单.xlsx", "xlsx-content"}, {"主机_1.2.3.4_步骤.log", "log-content"}} {
+		fw, _ := mw.CreateFormFile("file", pair[0])
+		fw.Write([]byte(pair[1]))
+	}
+	pathVals := []string{"out/results/清单.xlsx", "out/scriptdir/主机_1.2.3.4_步骤.log"}
+	for _, p := range pathVals {
+		mw.WriteField("path", p)
+	}
+	mw.Close()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/files", &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.AddCookie(cookie)
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("上传文件夹失败: %d %s", rec.Code, rec.Body.String())
+	}
+	for _, p := range []string{"out/results/清单.xlsx", "out/scriptdir/主机_1.2.3.4_步骤.log"} {
+		if _, err := os.Stat(filepath.Join(filesDir, filepath.FromSlash(p))); err != nil {
+			t.Errorf("子目录文件 %s 未落盘: %v", p, err)
+		}
+	}
+
+	// 浏览根目录：应显示 out 文件夹（isDir=true）
+	rec2, _ := doJSON(t, h, cookie, "GET", "/api/files", "")
+	var root struct {
+		Items []map[string]any `json:"items"`
+	}
+	json.Unmarshal(rec2.Body.Bytes(), &root)
+	if len(root.Items) != 1 || root.Items[0]["name"] != "out" || root.Items[0]["isDir"] != true {
+		t.Fatalf("根目录应显示 out 文件夹: %v", root.Items)
+	}
+	if root.Items[0]["ref"] != "files/out/" {
+		t.Errorf("文件夹引用路径应以 / 结尾: %v", root.Items[0]["ref"])
+	}
+
+	// 进入子目录浏览
+	rec3, _ := doJSON(t, h, cookie, "GET", "/api/files?path=out", "")
+	var sub struct {
+		Dir   string           `json:"dir"`
+		Items []map[string]any `json:"items"`
+	}
+	json.Unmarshal(rec3.Body.Bytes(), &sub)
+	if sub.Dir != "out" || len(sub.Items) != 2 {
+		t.Fatalf("out 下应有 2 个文件夹: %v", sub.Items)
+	}
+	for _, it := range sub.Items {
+		if it["isDir"] != true {
+			t.Errorf("out 下应为文件夹: %v", it)
+		}
+	}
+
+	// 浏览不存在的目录 -> 404
+	rec4, _ := doJSON(t, h, cookie, "GET", "/api/files?path=nope", "")
+	if rec4.Code != http.StatusNotFound {
+		t.Errorf("浏览不存在目录应 404: %d", rec4.Code)
+	}
+
+	// 文件夹打包下载：zip 内容含 out/results/清单.xlsx 与 out/scriptdir/主机_1.2.3.4_步骤.log
+	rec5 := httptest.NewRecorder()
+	req5 := httptest.NewRequest("GET", "/api/files/out", nil)
+	req5.AddCookie(cookie)
+	h.ServeHTTP(rec5, req5)
+	if rec5.Code != 200 {
+		t.Fatalf("文件夹下载失败: %d", rec5.Code)
+	}
+	if ct := rec5.Header().Get("Content-Type"); ct != "application/zip" {
+		t.Errorf("文件夹下载应为 zip: %q", ct)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(rec5.Body.Bytes()), int64(rec5.Body.Len()))
+	if err != nil {
+		t.Fatalf("解析 zip 失败: %v", err)
+	}
+	names := map[string]bool{}
+	for _, f := range zr.File {
+		names[f.Name] = true
+	}
+	if !names["out/results/清单.xlsx"] || !names["out/scriptdir/主机_1.2.3.4_步骤.log"] {
+		t.Errorf("zip 条目应保持目录结构: %v", names)
+	}
+
+	// 删除文件夹（递归）
+	rec6, _ := doJSON(t, h, cookie, "DELETE", "/api/files/out", "")
+	if rec6.Code != 200 {
+		t.Fatalf("删除文件夹失败: %d", rec6.Code)
+	}
+	if _, err := os.Stat(filepath.Join(filesDir, "out")); !os.IsNotExist(err) {
+		t.Error("删除后文件夹应不存在（递归删除）")
+	}
+}
+
+// 路径穿越：上传时 path 字段带 .. 应被拒绝（不落盘、不逃逸目录）
+// （文件名本身会被 Go 标准库净化成 basename，目录结构靠 path 字段传递，故对 path 严格校验）
+func TestFileUploadTraversalRejected(t *testing.T) {
+	s, h, _ := newTestWebServer(t)
+	cookie := doLogin(t, h)
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, _ := mw.CreateFormFile("file", "evil.txt")
+	fw.Write([]byte("x"))
+	mw.WriteField("path", "../../evil.txt") // 前端传的相对路径带穿越
+	mw.Close()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/files", &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.AddCookie(cookie)
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("路径穿越上传应 400: %d %s", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(s.settings.FilesDir), "evil.txt")); err == nil {
+		t.Error("文件逃逸出了 filesDir")
+	}
+	if _, err := os.Stat(filepath.Join(s.settings.FilesDir, "evil.txt")); err == nil {
+		t.Error("穿越请求的文件不应落盘")
 	}
 }
 

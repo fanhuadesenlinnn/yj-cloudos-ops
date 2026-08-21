@@ -13,14 +13,17 @@ import (
 // Settings Web 模式全局设置（默认文件 ./settings.yaml，可用 -web-settings 指定）
 type Settings struct {
 	Auth        AuthCfg `yaml:"auth"`        // 登录账号
+	Addr        string  `yaml:"addr"`        // Web 监听地址（如 0.0.0.0:8080）；命令行 -web-addr 优先；留空默认 0.0.0.0:8080
 	ConfigsDir  string  `yaml:"configsDir"`  // 多配置文件目录（默认 ./configs）
 	FilesDir    string  `yaml:"filesDir"`    // 文件管理目录（默认 ./files，Web 上传的文件放这里，配置里 local 引用 files/xxx）
 	HistorySize int     `yaml:"historySize"` // 运行历史保留条数（默认 10，重启即清空）
 }
 
 // AuthCfg 登录账号（密码以 盐+哈希 存储，不存明文）
+// 支持在 settings.yaml 里直接写明文密码 auth.password，加载时自动哈希化并写回（文件里不保留明文）
 type AuthCfg struct {
 	Username     string `yaml:"username"`
+	Password     string `yaml:"password"` // 明文密码（仅初始化用）：加载时哈希化后写回，文件里不保留明文
 	PasswordHash string `yaml:"passwordHash"`
 	Salt         string `yaml:"salt"`
 }
@@ -29,6 +32,7 @@ type AuthCfg struct {
 func defaultSettings() *Settings {
 	return &Settings{
 		Auth:        AuthCfg{Username: "admin"},
+		Addr:        "0.0.0.0:8080",
 		ConfigsDir:  "configs",
 		FilesDir:    "files",
 		HistorySize: 10,
@@ -39,6 +43,9 @@ func defaultSettings() *Settings {
 func (s *Settings) applyDefaults() {
 	if s.Auth.Username == "" {
 		s.Auth.Username = "admin"
+	}
+	if s.Addr == "" {
+		s.Addr = "0.0.0.0:8080"
 	}
 	if s.ConfigsDir == "" {
 		s.ConfigsDir = "configs"
@@ -71,6 +78,14 @@ func loadSettings(path string) (*Settings, error) {
 		return nil, fmt.Errorf("解析 %s 失败: %w", path, err)
 	}
 	s.applyDefaults()
+	// settings.yaml 里写了明文密码（auth.password）：哈希化并写回，文件里不保留明文
+	if s.Auth.Password != "" {
+		s.setPassword(s.Auth.Username, s.Auth.Password)
+		s.Auth.Password = ""
+		if err := saveSettings(path, s); err != nil {
+			return nil, err
+		}
+	}
 	// 兼容旧文件：无密码哈希时（异常），重置为 admin/admin
 	if s.Auth.PasswordHash == "" || s.Auth.Salt == "" {
 		s.setPassword("admin", "admin")

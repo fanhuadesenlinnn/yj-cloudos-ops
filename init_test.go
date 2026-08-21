@@ -57,7 +57,7 @@ func TestWebHelpAndDemoPresent(t *testing.T) {
 		}
 	}
 	// 精简版 demo 应包含核心字段
-	for _, s := range []string{"DEMO_YAML", "endpoint:", "accessKeyId:", "execList:", "type: files", "type: command", "type: services", "type: status", "output:", "dir: \"results\""} {
+	for _, s := range []string{"DEMO_YAML", "endpoint:", "accessKeyId:", "execList:", "type: files", "type: command", "type: services", "type: status", "output:", "dir: \"\""} {
 		if !strings.Contains(html, s) {
 			t.Errorf("前端 demo 缺少 %q", s)
 		}

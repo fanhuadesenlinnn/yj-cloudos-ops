@@ -76,13 +76,17 @@ func newClient(cfg *Config) *Client {
 	tr := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: cfg.InsecureSkipVerify}, // 支持跳过证书校验
 	}
+	rawDir := ""
+	if cfg.Raw.Enabled {
+		rawDir = cfg.Raw.Dir
+	}
 	return &Client{
 		endpoint:   strings.TrimRight(cfg.Endpoint, "/"),
 		ak:         cfg.AccessKeyID,
 		sk:         cfg.AccessKeySecret,
 		regionID:   cfg.RegionID,
 		httpClient: &http.Client{Transport: tr, Timeout: cfg.HTTPTimeout()},
-		rawDir:     cfg.Raw.Dir,
+		rawDir:     rawDir,
 	}
 }
 
@@ -189,7 +193,7 @@ func (c *Client) saveRaw(params map[string]string, body []byte) {
 // ensureRawDir 按运行时间戳创建原始数据保存目录（只创建一次）
 func (c *Client) ensureRawDir() string {
 	c.rawOnce.Do(func() {
-		sub := time.Now().Format("20060102-150405")
+		sub := time.Now().Format("20060102_150405")
 		dir := filepath.Join(c.rawDir, sub)
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			fmt.Fprintf(os.Stderr, "警告: 创建原始数据目录 %s 失败: %v\n", dir, err)

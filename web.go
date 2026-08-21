@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"context"
 	"crypto/rand"
 	_ "embed"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -126,29 +128,26 @@ type webServer struct {
 // sessionTTL 会话有效期
 const sessionTTL = 12 * time.Hour
 
-// runWeb 启动 Web 服务。daemon=true 时先后台化再启动（父进程拉起子进程后退出）。
-func runWeb(addr, configsDir, settingsPath string, daemon bool) {
-	// 设置（不存在则创建默认 admin/admin）；命令行 -web-configs 优先于 settings 里的配置目录
+// newWebServer 构建 Web 服务实例：加载设置（不存在则创建默认 admin/admin）、
+// 应用 -web-configs 覆盖、创建配置/文件目录、设置同名项目选择器。
+// 返回实例（含 settings 与监听地址 s.settings.Addr）。
+func newWebServer(settingsPath, configsDir string) (*webServer, error) {
 	st, err := loadSettings(settingsPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "加载设置失败: %v\n", err)
-		os.Exit(1)
+		return nil, fmt.Errorf("加载设置失败: %w", err)
 	}
 	if configsDir != "" {
 		st.ConfigsDir = configsDir
 		if err := saveSettings(settingsPath, st); err != nil {
-			fmt.Fprintf(os.Stderr, "保存设置失败: %v\n", err)
-			os.Exit(1)
+			return nil, fmt.Errorf("保存设置失败: %w", err)
 		}
 	}
 	// 配置目录 / 文件目录不存在则创建
 	if err := os.MkdirAll(st.ConfigsDir, 0o755); err != nil {
-		fmt.Fprintf(os.Stderr, "创建配置目录 %s 失败: %v\n", st.ConfigsDir, err)
-		os.Exit(1)
+		return nil, fmt.Errorf("创建配置目录 %s 失败: %w", st.ConfigsDir, err)
 	}
 	if err := os.MkdirAll(st.FilesDir, 0o755); err != nil {
-		fmt.Fprintf(os.Stderr, "创建文件目录 %s 失败: %v\n", st.FilesDir, err)
-		os.Exit(1)
+		return nil, fmt.Errorf("创建文件目录 %s 失败: %w", st.FilesDir, err)
 	}
 	// Web 模式：同名多项目不再 stdin 交互，按预选 ID 匹配或报错提示页面选择
 	projectChooser = func(matches []*Project) (*Project, error) {
@@ -162,6 +161,22 @@ func runWeb(addr, configsDir, settingsPath string, daemon bool) {
 		}
 		return nil, fmt.Errorf("发现 %d 个同名项目，请在页面上选择", len(matches))
 	}
+	return &webServer{
+		settings:     st,
+		settingsPath: settingsPath,
+		sessions:     map[string]time.Time{},
+		hub:          newEventHub(),
+	}, nil
+}
+
+// runWeb 启动 Web 服务。daemon=true 时先后台化再启动（父进程拉起子进程后退出）。
+func runWeb(addr, configsDir, settingsPath string, daemon bool) {
+	s, err := newWebServer(settingsPath, configsDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+	st := s.settings
 
 	// 后台化：子进程重新启动（去掉 -daemon 参数），父进程退出，命令行窗口关闭
 	if daemon {
@@ -190,13 +205,6 @@ func runWeb(addr, configsDir, settingsPath string, daemon bool) {
 			fmt.Fprintf(os.Stderr, "写入 PID 文件失败: %v\n", err)
 			os.Exit(1)
 		}
-	}
-
-	s := &webServer{
-		settings:     st,
-		settingsPath: settingsPath,
-		sessions:     map[string]time.Time{},
-		hub:          newEventHub(),
 	}
 
 	handler := s.routes()
@@ -400,6 +408,7 @@ func (s *webServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		jsonResponse(w, map[string]any{
 			"username":    s.settings.Auth.Username,
+			"addr":        s.settings.Addr,
 			"configsDir":  s.settings.ConfigsDir,
 			"filesDir":    s.settings.FilesDir,
 			"historySize": s.settings.HistorySize,
@@ -409,6 +418,7 @@ func (s *webServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Username    string `json:"username"`
 			Password    string `json:"password"`
+			Addr        string `json:"addr"`
 			ConfigsDir  string `json:"configsDir"`
 			FilesDir    string `json:"filesDir"`
 			HistorySize int    `json:"historySize"`
@@ -426,6 +436,13 @@ func (s *webServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			s.settings.setPassword(s.settings.Auth.Username, req.Password)
+		}
+		if req.Addr != "" {
+			if host, port, err := splitHostPort(req.Addr); err != nil || host == "" || port == "" {
+				http.Error(w, "监听地址格式应为 host:port（如 0.0.0.0:8080）", http.StatusBadRequest)
+				return
+			}
+			s.settings.Addr = req.Addr
 		}
 		if req.ConfigsDir != "" {
 			if err := os.MkdirAll(req.ConfigsDir, 0o755); err != nil {
@@ -720,7 +737,12 @@ func (s *webServer) handleRun(w http.ResponseWriter, r *http.Request) {
 
 // runJob 后台执行一次运行：拉主机 -> 流水线 -> 导出，全程推送 SSE 事件
 func (s *webServer) runJob(job *Job) {
+	// 关键状态日志推送到页面（复用 runLog 机制，CLI 模式为 nil）
+	runLog = func(line string) {
+		s.hub.publish(job.ID, "log", map[string]any{"line": line})
+	}
 	defer func() {
+		runLog = nil
 		job.FinishedAt = time.Now()
 		if job.Status == "running" {
 			job.Status = "done"
@@ -853,9 +875,19 @@ func (s *webServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Unlock()
 	if j != nil {
-		if data, err := json.Marshal(jobSummary(j)); err == nil {
+		data, err := json.Marshal(jobSummary(j))
+		if err == nil {
 			fmt.Fprintf(w, "event: snapshot\ndata: %s\n\n", data)
 			flusher.Flush()
+		}
+		// 任务已结束：补发 finish（避免 finish 事件在订阅建立前已发布而被丢弃，
+		// 前端 snapshot 拿到的是最新状态，但补发 finish 更稳妥，双保险）
+		if j.Status != "running" {
+			if err == nil {
+				fmt.Fprintf(w, "event: finish\ndata: %s\n\n", data)
+				flusher.Flush()
+			}
+			return
 		}
 	}
 
@@ -930,57 +962,132 @@ func (s *webServer) handleExport(w http.ResponseWriter, r *http.Request) {
 // maxUploadSize 上传文件大小上限
 const maxUploadSize = 2 << 30 // 2GB
 
-// handleFiles 文件列表 / 上传
+// safeFilesPath 把相对路径（含子目录，如 "out/results"）安全解析到文件目录下（防路径穿越）
+func (s *webServer) safeFilesPath(rel string) (string, error) {
+	base := filepath.Clean(s.settings.FilesDir)
+	if rel == "" {
+		return base, nil
+	}
+	rel = strings.TrimSpace(strings.ReplaceAll(rel, "\\", "/"))
+	rel = strings.Trim(rel, "/")
+	if rel == "" {
+		return base, nil
+	}
+	p := filepath.Clean(filepath.Join(base, filepath.FromSlash(rel)))
+	if p != base && !strings.HasPrefix(p, base+string(filepath.Separator)) {
+		return "", fmt.Errorf("非法路径: %s", rel)
+	}
+	return p, nil
+}
+
+// handleFiles 文件/文件夹列表（支持多级子目录浏览 ?path=）+ 上传（支持文件/文件夹）
 func (s *webServer) handleFiles(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		entries, err := os.ReadDir(s.settings.FilesDir)
+		rel := r.URL.Query().Get("path")
+		dir, err := s.safeFilesPath(rel)
 		if err != nil {
-			http.Error(w, "读取文件目录失败: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		files := []map[string]any{}
-		for _, e := range entries {
-			if e.IsDir() {
-				continue // 只管理文件，子目录不展示（避免意外删目录）
+		if rel != "" {
+			info, err := os.Stat(dir)
+			if err != nil || !info.IsDir() {
+				http.Error(w, "目录不存在: "+rel, http.StatusNotFound)
+				return
 			}
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			http.Error(w, "读取目录失败: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		items := []map[string]any{}
+		for _, e := range entries {
 			info, err := e.Info()
 			if err != nil {
 				continue
 			}
-			files = append(files, map[string]any{
+			isDir := e.IsDir()
+			p := rel
+			if p != "" {
+				p += "/"
+			}
+			p += e.Name()
+			items = append(items, map[string]any{
 				"name":    e.Name(),
+				"isDir":   isDir,
 				"size":    info.Size(),
 				"modTime": info.ModTime(),
-				"ref":     filepath.Join("files", e.Name()), // 配置里 local 的引用路径
+				"path":    p,                  // 相对路径（浏览/下载/删除用）
+				"ref":     "files/" + p,       // 配置里 local 的引用路径（统一正斜杠；目录结尾带 /）
 			})
+			if isDir {
+				items[len(items)-1]["ref"] = "files/" + p + "/"
+			}
 		}
-		jsonResponse(w, files)
+		// 目录在前、文件在后（保持稳定顺序）
+		sort.SliceStable(items, func(i, j int) bool {
+			a, _ := items[i]["isDir"].(bool)
+			b, _ := items[j]["isDir"].(bool)
+			return a != b && a
+		})
+		jsonResponse(w, map[string]any{"dir": rel, "items": items})
 	case http.MethodPost:
-		// 上传：multipart/form-data，字段 file（可多个）
+		// 上传：multipart/form-data，字段 file（可多个）；文件名可带相对路径（选择文件夹上传）
 		r.Body = http.MaxBytesReader(w, r.Body, maxUploadSize)
 		if err := r.ParseMultipartForm(maxUploadSize); err != nil {
 			http.Error(w, "上传失败（文件过大或格式错误）: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		targetRel := r.URL.Query().Get("path")
+		targetDir, err := s.safeFilesPath(targetRel)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if targetRel != "" {
+			if info, err := os.Stat(targetDir); err != nil || !info.IsDir() {
+				http.Error(w, "目标目录不存在: "+targetRel, http.StatusNotFound)
+				return
+			}
+		}
 		if err := os.MkdirAll(s.settings.FilesDir, 0o755); err != nil {
 			http.Error(w, "创建文件目录失败: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+		// 文件夹上传：每个文件额外带 path 字段（webkitRelativePath，含相对路径），与 file 一一对应；
+		// Go 标准库会把 multipart 文件名净化成 basename，所以目录结构必须走 path 字段保留。
+		relPaths := r.MultipartForm.Value["path"]
 		uploaded := []string{}
-		for _, fh := range r.MultipartForm.File["file"] {
-			// 防路径穿越：拒绝带路径分隔符的文件名（不静默净化，避免用户困惑）
-			if strings.ContainsAny(fh.Filename, "/\\") || fh.Filename == "." || fh.Filename == ".." {
-				http.Error(w, "非法文件名（不能包含路径）: "+fh.Filename, http.StatusBadRequest)
+		for i, fh := range r.MultipartForm.File["file"] {
+			// 相对路径：优先用前端传来的 path（文件夹上传）；否则用文件名 basename（单文件上传）
+			name := fh.Filename
+			if i < len(relPaths) && strings.TrimSpace(relPaths[i]) != "" {
+				name = relPaths[i]
+			}
+			name = strings.ReplaceAll(name, "\\", "/")
+			name = strings.Trim(name, "/")
+			if name == "" || name == "." || name == ".." || strings.Contains(name, "..") {
+				http.Error(w, "非法文件名: "+fh.Filename, http.StatusBadRequest)
 				return
 			}
-			name := fh.Filename
+			full := filepath.Join(targetDir, filepath.FromSlash(name))
+			rel, err := filepath.Rel(targetDir, full)
+			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+				http.Error(w, "非法文件名（路径穿越）: "+fh.Filename, http.StatusBadRequest)
+				return
+			}
+			if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+				http.Error(w, "创建子目录失败: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
 			in, err := fh.Open()
 			if err != nil {
 				http.Error(w, "读取上传文件失败: "+err.Error(), http.StatusBadRequest)
 				return
 			}
-			out, err := os.Create(filepath.Join(s.settings.FilesDir, name))
+			out, err := os.Create(full)
 			if err != nil {
 				in.Close()
 				http.Error(w, "保存文件失败: "+err.Error(), http.StatusInternalServerError)
@@ -1005,24 +1112,46 @@ func (s *webServer) handleFiles(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleFileItem 单个文件：下载 / 删除
+// handleFileItem 文件/文件夹：下载（文件夹打包 zip）/ 删除（文件夹递归）
 func (s *webServer) handleFileItem(w http.ResponseWriter, r *http.Request) {
-	name := strings.TrimPrefix(r.URL.Path, "/api/files/")
-	name = filepath.Base(name) // 防路径穿越
-	if name == "." || name == ".." || strings.Contains(name, "/") || strings.Contains(name, "\\") {
-		http.Error(w, "非法文件名", http.StatusBadRequest)
+	rel := strings.TrimPrefix(r.URL.Path, "/api/files/")
+	path, err := s.safeFilesPath(rel)
+	if err != nil {
+		http.Error(w, "非法路径", http.StatusBadRequest)
 		return
 	}
-	path := filepath.Join(s.settings.FilesDir, name)
-	if !fileExists(path) {
-		http.Error(w, "文件不存在", http.StatusNotFound)
+	info, err := os.Stat(path)
+	if err != nil {
+		http.Error(w, "文件或文件夹不存在", http.StatusNotFound)
 		return
 	}
 	switch r.Method {
 	case http.MethodGet:
-		w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
+		if info.IsDir() {
+			// 文件夹：打包 zip 下载（条目保持目录结构，含文件夹名）
+			zipName := filepath.Base(path) + "_" + time.Now().Format("20060102_150405") + ".zip"
+			w.Header().Set("Content-Type", "application/zip")
+			w.Header().Set("Content-Disposition", `attachment; filename="`+zipName+`"`)
+			zw := zip.NewWriter(w)
+			if err := zipDir(zw, path); err != nil {
+				zw.Close()
+				http.Error(w, "打包失败: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			zw.Close()
+			return
+		}
+		w.Header().Set("Content-Disposition", `attachment; filename="`+filepath.Base(path)+`"`)
 		http.ServeFile(w, r, path)
 	case http.MethodDelete:
+		if info.IsDir() {
+			if err := os.RemoveAll(path); err != nil {
+				http.Error(w, "删除失败: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			jsonResponse(w, map[string]any{"ok": true})
+			return
+		}
 		if err := os.Remove(path); err != nil {
 			http.Error(w, "删除失败: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -1031,6 +1160,34 @@ func (s *webServer) handleFileItem(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "不支持的方法", http.StatusMethodNotAllowed)
 	}
+}
+
+// zipDir 把目录（含自身）打包进 zip：条目名形如 <目录名>/<子目录>/<文件>，保持目录结构
+func zipDir(zw *zip.Writer, dir string) error {
+	parent := filepath.Dir(dir)
+	return filepath.Walk(dir, func(p string, fi os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if fi.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(parent, p)
+		if err != nil {
+			return err
+		}
+		fw, err := zw.Create(filepath.ToSlash(rel))
+		if err != nil {
+			return err
+		}
+		f, err := os.Open(p)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		_, err = io.Copy(fw, f)
+		return err
+	})
 }
 
 // ---------- 日志 API ----------

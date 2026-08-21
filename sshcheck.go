@@ -30,6 +30,19 @@ const statusCommand = `echo "===OS==="; . /etc/os-release 2>/dev/null; echo "$PR
 // sshProgress 当前 runSSHTests 的实时进度控制器；未运行时为 nil（测试直接调用 trySSH/testOne 时不受影响）。
 var sshProgress *progressMgr
 
+// runLog 运行时关键状态推送回调（Web 模式：SSE log 事件；CLI 模式为 nil，直接走 stderr）。
+// 由 webServer.runJob 在任务开始前设置、结束后清空（同一时刻仅一个任务，全局安全）。
+var runLog func(line string)
+
+// logLine 输出一条运行状态：Web 模式推送到页面日志，CLI 模式写 stderr
+func logLine(line string) {
+	if runLog != nil {
+		runLog(line)
+	} else {
+		fmt.Fprintln(os.Stderr, line)
+	}
+}
+
 // vmProgress 单台机器的实时执行状态（进度显示用）
 type vmProgress struct {
 	ip        string
@@ -1114,10 +1127,10 @@ func scriptLogDir(cfg *Config) string {
 	}
 	dir := filepath.Join(cfg.Output.ScriptDir, time.Now().Format("20060102_150405"))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		fmt.Fprintf(os.Stderr, "警告: 创建脚本输出目录失败: %v（不落盘）\n", err)
+		logLine(fmt.Sprintf("警告: 创建脚本输出目录失败: %v（不落盘）", err))
 		return ""
 	}
-	fmt.Fprintf(os.Stderr, "脚本输出保存目录: %s\n", dir)
+	logLine("脚本输出保存目录: " + dir)
 	return dir
 }
 

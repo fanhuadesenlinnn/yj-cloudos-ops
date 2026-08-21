@@ -111,6 +111,10 @@ tr.clickable:hover td { background:#f7f9ff; }
         <h3>结果 <span class="muted" id="result-meta"></span></h3>
         <div style="overflow:auto"><table id="result-table"></table></div>
       </div>
+      <div class="card" id="history-card">
+        <h3>历史记录 <span class="muted" id="history-meta"></span></h3>
+        <div style="overflow:auto"><table id="history-table"></table></div>
+      </div>
     </div>
 
     <!-- 配置管理 -->
@@ -136,16 +140,23 @@ tr.clickable:hover td { background:#f7f9ff; }
     <!-- 文件管理 -->
     <div id="tab-files" class="hidden">
       <div class="card">
-        <h3>文件管理 <span class="muted">上传的文件放在 <code id="files-dir"></code>，配置里 <code>files</code> 模块的 <code>local</code> 引用 <code>files/文件名</code> 即可推送到服务器</span></h3>
+        <h3>文件管理 <span class="muted">上传的文件放在 <code id="files-dir"></code>，配置里 <code>files</code> 模块的 <code>local</code> 引用 <code>files/路径</code> 即可推送到服务器（支持多级子目录，文件夹上传/下载保持结构）</span></h3>
         <div class="row">
           <input type="file" id="file-input" multiple>
-          <button class="pri" id="btn-upload" onclick="uploadFiles()">上传</button>
+          <button class="pri" id="btn-upload" onclick="uploadFiles('file')">上传文件</button>
+          <input type="file" id="dir-input" webkitdirectory directory style="display:none">
+          <button class="pri" id="btn-upload-dir" onclick="$('dir-input').click()">上传文件夹</button>
         </div>
         <div id="upload-progress" class="hidden" style="margin-bottom:10px">
           <div style="background:#eef1f5;border-radius:4px;height:8px;overflow:hidden">
             <div id="upload-bar" style="background:var(--pri);height:100%;width:0%;transition:width .2s"></div>
           </div>
           <div class="muted" id="upload-text" style="margin-top:4px"></div>
+        </div>
+        <div class="row" style="align-items:center">
+          <button id="files-back" onclick="goUp()" style="visibility:hidden">⬆ 上级</button>
+          <button onclick="goDir('')">📁 根目录</button>
+          <span id="files-crumb" class="muted"></span>
         </div>
         <div style="overflow:auto"><table id="files-table"></table></div>
       </div>
@@ -161,6 +172,7 @@ tr.clickable:hover td { background:#f7f9ff; }
       </div>
       <div class="card">
         <h3>运行设置</h3>
+        <div class="row"><label style="width:80px">监听地址</label><input id="set-addr" style="width:200px" placeholder="如：0.0.0.0:8080"><span class="muted">重启后生效；命令行 -web-addr 优先</span></div>
         <div class="row"><label style="width:80px">配置目录</label><input id="set-dir" style="width:300px" placeholder="如：configs"></div>
         <div class="row"><label style="width:80px">文件目录</label><input id="set-filesdir" style="width:300px" placeholder="如：files"></div>
         <div class="row"><label style="width:80px">历史保留</label><input id="set-history" type="number" min="1" max="100" style="width:80px"><span class="muted">条（重启即清空）</span></div>
@@ -244,7 +256,8 @@ async function enterMain(){
 // ---------- 设置 ----------
 async function loadSettingsForm(){
   const s = await api('/api/settings');
-  $('set-user').value = s.username; $('set-dir').value = s.configsDir;
+  $('set-user').value = s.username; $('set-addr').value = s.addr || '0.0.0.0:8080';
+  $('set-dir').value = s.configsDir;
   $('set-filesdir').value = s.filesDir; $('set-history').value = s.historySize;
   $('files-dir').textContent = s.filesDir;
 }
@@ -252,36 +265,67 @@ async function saveSettings(){
   try {
     await api('/api/settings', {method:'POST', body: JSON.stringify({
       username:$('set-user').value, password:$('set-pass').value,
-      configsDir:$('set-dir').value, filesDir:$('set-filesdir').value,
+      addr:$('set-addr').value, configsDir:$('set-dir').value, filesDir:$('set-filesdir').value,
       historySize:parseInt($('set-history').value)||10})});
     toast('设置已保存'); $('set-pass').value='';
     await loadConfigs(); await loadFiles();
   } catch(e){ toast(e.message); }
 }
 
-// ---------- 文件管理 ----------
+// ---------- 文件管理（支持多级子目录浏览 / 文件夹上传下载） ----------
+let filesCur = ''; // 当前浏览的子目录（相对 filesDir）
 async function loadFiles(){
   try {
-    const list = await api('/api/files');
+    const res = await api('/api/files?path='+encodeURIComponent(filesCur));
+    filesCur = res.dir || '';
     const tb = $('files-table');
-    tb.innerHTML = '<tr><th>文件名</th><th>大小</th><th>修改时间</th><th>引用路径</th><th>操作</th></tr>' +
-      (list.length ? list.map(f=>`<tr>
-        <td>${esc(f.name)}</td><td>${fmtSize(f.size)}</td><td>${fmtTime(f.modTime)}</td>
-        <td><code>${esc(f.ref)}</code> <button onclick="copyRef('${escAttr(f.name)}')">复制</button></td>
-        <td><button onclick="downloadFile('${escAttr(f.name)}')">下载</button>
-            <button class="danger" onclick="delFile('${escAttr(f.name)}')">删除</button></td>
-      </tr>`).join('') : '<tr><td colspan="5" class="muted">还没有文件，选择文件后点击「上传」</td></tr>');
+    // 面包屑
+    const crumb = [];
+    let acc = '';
+    for (const seg of filesCur.split('/').filter(Boolean)){
+      acc = acc ? acc+'/'+seg : seg;
+      crumb.push(`<a href="javascript:goDir('${escAttr(acc)}')">${esc(seg)}</a>`);
+    }
+    $('files-crumb').innerHTML = crumb.length ? ' / '+crumb.join(' / ') : '（根目录）';
+    $('files-back').style.visibility = filesCur ? 'visible' : 'hidden';
+    const items = res.items || [];
+    tb.innerHTML = '<tr><th>类型</th><th>名称</th><th>大小</th><th>修改时间</th><th>引用路径</th><th>操作</th></tr>' +
+      (items.length ? items.map(f=>{
+        const icon = f.isDir ? '📁' : '📄';
+        const nameCell = f.isDir
+          ? `<a href="javascript:goDir('${escAttr(f.path)}')">${icon} ${esc(f.name)}</a>`
+          : `${icon} ${esc(f.name)}`;
+        return `<tr>
+          <td>${f.isDir?'文件夹':'文件'}</td>
+          <td>${nameCell}</td>
+          <td>${f.isDir?'—':fmtSize(f.size)}</td>
+          <td>${fmtTime(f.modTime)}</td>
+          <td><code>${esc(f.ref)}</code> <button onclick="copyRef('${escAttr(f.path)}',${f.isDir})">复制</button></td>
+          <td><button onclick="downloadFile('${escAttr(f.path)}')">${f.isDir?'打包下载':'下载'}</button>
+              <button class="danger" onclick="delFile('${escAttr(f.path)}',${f.isDir})">删除</button></td>
+        </tr>`;
+      }).join('') : '<tr><td colspan="6" class="muted">目录为空，选择文件/文件夹后点击「上传」</td></tr>');
   } catch(e){ toast(e.message); }
 }
-// 上传文件：XHR 异步上传（不阻塞页面其他操作），带进度条
-function uploadFiles(){
-  const input = $('file-input');
-  if (!input.files.length){ toast('请先选择文件'); return; }
+function goDir(path){ filesCur = path; loadFiles(); }
+function goUp(){
+  const parts = filesCur.split('/').filter(Boolean);
+  parts.pop();
+  filesCur = parts.join('/');
+  loadFiles();
+}
+// 上传（文件或文件夹，kind=file/dir）：XHR 异步上传（不阻塞页面其他操作），带进度条
+function uploadFiles(kind){
+  const input = kind==='dir' ? $('dir-input') : $('file-input');
+  if (!input.files.length){ toast(kind==='dir'?'请先选择文件夹':'请先选择文件'); return; }
   const fd = new FormData();
-  for (const f of input.files) fd.append('file', f);
+  for (const f of input.files){
+    fd.append('file', f);
+    if (kind==='dir' && f.webkitRelativePath) fd.append('path', f.webkitRelativePath); // 保留文件夹相对结构
+  }
   const total = input.files.length;
   const xhr = new XMLHttpRequest();
-  const btn = $('btn-upload');
+  const btn = kind==='dir' ? $('btn-upload-dir') : $('btn-upload');
   const bar = $('upload-bar'), prog = $('upload-progress'), txt = $('upload-text');
 
   // 上传进度（只统计已发送字节；多个文件时按总字节估算）
@@ -314,17 +358,18 @@ function uploadFiles(){
   prog.classList.remove('hidden');
   txt.textContent = '开始上传 '+total+' 个文件...';
   btn.disabled = true; // 上传中禁用按钮，防重复提交
-  xhr.open('POST', '/api/files');
+  xhr.open('POST', '/api/files?path='+encodeURIComponent(filesCur));
   xhr.send(fd);
 }
-async function downloadFile(name){ window.location = '/api/files/'+encodeURIComponent(name); }
-async function delFile(name){
-  if (!confirm('确定删除文件「'+name+'」？')) return;
-  try { await api('/api/files/'+encodeURIComponent(name), {method:'DELETE'}); toast('已删除'); await loadFiles(); }
+async function downloadFile(path){ window.location = '/api/files/'+encodeURIComponent(path); }
+async function delFile(path, isDir){
+  if (!confirm('确定删除'+(isDir?'文件夹':'文件')+'「'+path+'」？'+(isDir?'（将递归删除其中所有内容）':''))) return;
+  try { await api('/api/files/'+encodeURIComponent(path), {method:'DELETE'}); toast('已删除'); await loadFiles(); }
   catch(e){ toast(e.message); }
 }
-async function copyRef(name){
-  try { await navigator.clipboard.writeText('files/'+name); toast('已复制引用路径: files/'+name); }
+async function copyRef(path, isDir){
+  const ref = 'files/'+path+(isDir?'/':'');
+  try { await navigator.clipboard.writeText(ref); toast('已复制引用路径: '+ref); }
   catch(e){ toast('复制失败: '+e.message); }
 }
 function fmtSize(n){
@@ -448,12 +493,27 @@ function connectSSE(jobId){
 }
 function appendLog(line){ const l=$('logs'); l.textContent += line+'\n'; l.scrollTop = l.scrollHeight; }
 
+// 处理任务快照/事件：snapshot 用于恢复当前任务状态（页面刷新/重连后），
+// 任务已结束则直接走 onFinish，避免 finish 事件在 SSE 订阅建立前发布而丢失（表现为卡住）
+function applyEvent(data, isSnapshot){
+  if (!data || !data.id) return;
+  if (isSnapshot) currentJob = data;
+  if (data.status === 'running'){
+    $('run-status').textContent = '任务运行中' + (data.progress ? '：'+data.progress : '');
+    if (data.total > 0) $('progress-line').textContent = `完成 ${data.done}/${data.total} (${pctPercent(data.done,data.total)}%)`;
+  } else if (data.status === 'done' || data.status === 'failed'){
+    onFinish(data);
+  }
+}
+function pctPercent(done, total){ return total>0 ? Math.round(done*100/total) : 0; }
+
 function onFinish(summary){
   if (es){ es.close(); es=null; }
   const runBtn=$('btn-run'), chkBtn=$('btn-check');
   runBtn.disabled=false; runBtn.textContent='▶ 开始运行';
   chkBtn.disabled=false; chkBtn.textContent='🔍 开始检查';
   currentJob = summary;
+  loadHistory(); // 任务结束刷新历史列表
   if (summary.status==='failed'){
     // 友好提示：区分“语法/配置错误”（改配置）与“执行失败”（可重试）
     const err = summary.error||'';
@@ -481,8 +541,45 @@ async function loadResult(jobId, isCheck){
     resultVMs = r.vms || [];
     $('result-meta').textContent = `共 ${resultVMs.length} 台` + (isCheck ? '（检查模式：仅 SSH 连通性）' : '');
     if (!isCheck && r.excelPath) $('btn-export').classList.remove('hidden');
+    else $('btn-export').classList.add('hidden');
     renderTable(resultVMs);
   } catch(e){ toast(e.message); }
+}
+
+// ---------- 历史记录 ----------
+// 查看某条历史任务的详情（复用结果表格；currentJob 更新后导出按钮指向该任务）
+async function viewHistory(id, mode){
+  currentJob = {id, mode};
+  const btn=$('btn-export');
+  if (mode==='check') btn.classList.add('hidden');
+  await loadResult(id, mode==='check');
+  $('history-card').scrollIntoView({behavior:'smooth'});
+}
+function historyBadge(h){
+  if (h.status==='running') return '<span style="color:var(--pri)">运行中</span>';
+  if (h.status==='failed') return '<span style="color:var(--bad)">失败</span>';
+  return '<span style="color:#16a34a">成功</span>';
+}
+async function loadHistory(){
+  try {
+    const list = await api('/api/history');
+    $('history-meta').textContent = `最近 ${list.length} 次（重启即清空）`;
+    const tb = $('history-table');
+    tb.innerHTML = '<tr><th>配置</th><th>模式</th><th>开始时间</th><th>状态</th><th>进度/结果</th><th>操作</th></tr>' +
+      (list.length ? list.map(h=>`<tr class="clickable" onclick="viewHistory('${h.id}','${h.mode}')">
+        <td>${esc(h.profile)}</td>
+        <td>${h.mode==='check'?'🔍 检查':'▶ 运行'}</td>
+        <td>${fmtTime(h.startedAt)}</td>
+        <td>${historyBadge(h)}</td>
+        <td>${esc(h.progress||'')}${h.error?'<div class="muted">'+esc(h.error)+'</div>':''}</td>
+        <td>${h.excelFile?`<button onclick="event.stopPropagation();exportHistory('${h.id}')">下载Excel</button>`:''}
+            <button>查看</button></td>
+      </tr>`).join('') : '<tr><td colspan="6" class="muted">暂无历史，运行或检查后这里会展示最近的任务记录</td></tr>');
+  } catch(e){ toast(e.message); }
+}
+async function exportHistory(id){
+  const w = window.open('/api/export?job='+id);
+  if (w) w.focus();
 }
 function renderTable(vms){
   const tb = $('result-table');
@@ -516,6 +613,7 @@ function exportExcel(){
 function switchTab(name){
   document.querySelectorAll('.tab[data-tab]').forEach(t=>t.classList.toggle('active', t.dataset.tab===name));
   ['run','configs','files','settings','help'].forEach(t=>$('tab-'+t).classList.toggle('hidden', t!==name));
+  if (name==='run') loadHistory();
   if (name==='configs') loadConfigs();
   if (name==='files') loadFiles();
   if (name==='settings') loadSettingsForm();
@@ -589,11 +687,12 @@ execList:
     type: status
     onError: continue
 
-# 输出：导出目录（留空不导出），文件名自动生成 <配置名>_<时间戳>.xlsx
+# 输出：dir 留空默认 files/out/results；scriptDir 留空默认 files/out/scriptdir
+# raw 原始请求数据默认不保存，显式开启 raw.enabled: true 后才保存到 files/out/raw
 output:
   showPassword: true
-  dir: "results"
-  scriptDir: ""        # command 步骤完整输出按机器落盘目录（可选）
+  dir: ""           # 留空默认 files/out/results
+  scriptDir: ""     # 留空默认 files/out/scriptdir
 `;
 
 // 帮助内容：各模块使用方法（静态 Markdown，随二进制打包）
@@ -612,7 +711,9 @@ const HELP_MD = `# 配置说明
 | \`resource.type\` | \`ecs\`(默认)/\`bms\`(裸金属)/\`all\` |
 | \`project.name/names\` | 项目名称，支持多个；\`*\`/\`all\` 检查全部项目 |
 | \`filter\` | IP 筛选：includeIPs 圈定 + excludeIPs 剔除，支持精确IP/CIDR/通配符 |
-| \`output.dir\` | 导出目录，留空不导出；文件名自动生成 \`<配置名>_<时间戳>.xlsx\` |
+| \`output.dir\` | Excel 导出目录（留空默认 \`files/out/results\`）；文件名自动生成 \`<配置名>_<时间戳>.xlsx\` |
+| \`output.scriptDir\` | command 步骤输出落盘目录（留空默认 \`files/out/scriptdir\`） |
+| \`raw.enabled\` | 接口原始返回数据保存开关（默认 false），开启后保存到 \`raw.dir\`（留空默认 \`files/out/raw\`） |
 | \`filesDir\`（设置页） | 文件管理目录（默认 files/），Web 上传的文件放这里 |
 
 ## 流水线 execList
