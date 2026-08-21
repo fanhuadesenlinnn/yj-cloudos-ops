@@ -51,6 +51,18 @@ func main() {
 
 	// Windows 服务管理（-service install / uninstall / run）
 	if *serviceMode != "" {
+		// install / uninstall 需要管理员权限：非管理员时自动 UAC 提权重启
+		if *serviceMode == "install" || *serviceMode == "uninstall" {
+			relaunched, err := ensureAdmin()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%v\n", err)
+				os.Exit(1)
+			}
+			if relaunched {
+				fmt.Fprintf(os.Stderr, "正在请求管理员权限（UAC 弹窗），请在弹出窗口中点击「是」...\n")
+				os.Exit(0)
+			}
+		}
 		switch *serviceMode {
 		case "install":
 			if err := installService(*webSettings); err != nil {

@@ -9,10 +9,50 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+	"unsafe"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
+
+// procShellExecuteW shell32.ShellExecuteW（UAC 提权用）
+var procShellExecuteW = windows.NewLazySystemDLL("shell32.dll").NewProc("ShellExecuteW")
+
+// ensureAdmin 检测当前进程是否管理员（UAC 提权视角）。
+// 非管理员时用 ShellExecute(verb=runas) 以管理员身份重新启动自身，返回 (true, nil)，调用方应退出；
+// 已是管理员返回 (false, nil) 继续执行。用于 -service install/uninstall 自动弹 UAC 确认框。
+func ensureAdmin() (bool, error) {
+	if windows.GetCurrentProcessToken().IsElevated() {
+		return false, nil
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return false, err
+	}
+	// 重新拼接原参数（含引号转义，settings 路径等可能含空格）
+	args := ""
+	for i, a := range os.Args[1:] {
+		if i > 0 {
+			args += " "
+		}
+		args += windows.EscapeArg(a)
+	}
+	dir, _ := os.Getwd()
+	r1, _, err := procShellExecuteW.Call(
+		0, // hwnd：无父窗口
+		uintptr(unsafe.Pointer(windows.StringToUTF16Ptr("runas"))), // verb：提权
+		uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(exe))),
+		uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(args))),
+		uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(dir))),
+		1, // SW_SHOWNORMAL
+	)
+	// ShellExecute 返回值 <= 32 表示失败（含用户取消 UAC 弹窗）
+	if r1 <= 32 {
+		return false, fmt.Errorf("请求管理员权限失败（可能取消了 UAC 弹窗）: %v", err)
+	}
+	return true, nil
+}
 
 // serviceName Windows 服务名
 const serviceName = "yj-cloudos-ops"
