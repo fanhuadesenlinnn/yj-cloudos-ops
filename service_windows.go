@@ -134,8 +134,27 @@ func uninstallService() error {
 	return nil
 }
 
+// isServiceContext 判断当前进程是否由服务控制管理器（SCM）启动：
+// 服务运行在 Session 0，普通交互进程（控制台/RDP）的会话 ID 通常 >= 1
+func isServiceContext() bool {
+	var sid uint32
+	if err := windows.ProcessIdToSessionId(uint32(os.Getpid()), &sid); err != nil {
+		return false
+	}
+	return sid == 0
+}
+
 // runWebAsService 以 Windows 服务方式运行 Web 服务（-service run，由 SCM 拉起）
+// 注意：-service run 只能由服务控制管理器启动（net start / 服务管理器），
+// 直接在命令行运行会因连不上服务控制器而失败，这里提前检测并给出友好提示。
 func runWebAsService(settingsPath string) error {
+	if !isServiceContext() {
+		return fmt.Errorf("\n-service run 只能由服务控制管理器（SCM）启动，不能直接命令行运行。\n"+
+			"请用以下方式启动服务：\n"+
+			"  net start %s\n"+
+			"  或：服务管理器（services.msc）中找到「yj-cloudos-ops Web 服务」点击启动\n"+
+			"停止服务: net stop %s", serviceName, serviceName)
+	}
 	return svc.Run(serviceName, &webServiceHandler{settingsPath: settingsPath})
 }
 
